@@ -1,10 +1,10 @@
 use std::io;
 
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::units::teltonika::{
-    data_parser::teltonika_parse_data,
-    utils::{teltonika_print, write_imei_handshake},
+    data_parser::teltonika_parse_frame,
+    utils::{teltonika_print, teltonika_write_imei_handshake},
 };
 
 pub mod data_parser;
@@ -17,12 +17,14 @@ pub async fn teltonika_listen(
     imei: String,
 ) -> io::Result<()> {
     let peer_addr = socket.peer_addr().ok();
-    write_imei_handshake(&mut socket, accepted).await?;
+    teltonika_write_imei_handshake(&mut socket, accepted).await?;
 
     if !accepted {
         println!("Rejected IMEI {imei}, closing connection.");
         return Ok(());
     }
+
+    let mut acc: Vec<u8> = Vec::with_capacity(8192);
 
     loop {
         let mut buf = [0u8; 4096];
@@ -35,10 +37,38 @@ pub async fn teltonika_listen(
         }
 
         println!("Received {} bytes: {}", n, hex::encode(&buf[..n]));
+        acc.extend_from_slice(&buf[..n]);
 
-        // TODO: replace with read_teltonika_frame(&mut socket).await? and ACK logic
-        let data = teltonika_parse_data(&buf).unwrap();
+        loop {
+            if acc.len() < 8 {
+                break;
+            }
 
-        teltonika_print(data);
+            // Resync: Teltonika TCP preamble should be 0x00000000
+            if acc[0..4] != [0, 0, 0, 0] {
+                if let Some(pos) = acc.windows(4).position(|w| w == [0, 0, 0, 0]) {
+                    acc.drain(..pos);
+                } else {
+                    acc.clear();
+                }
+                break;
+            }
+
+            let data_len = u32::from_be_bytes(acc[4..8].try_into().unwrap()) as usize;
+            let frame_len = 8 + data_len + 4;
+
+            if acc.len() < frame_len {
+                // We don't have the full Teltonika frame yet
+                break;
+            }
+
+            let frame: Vec<u8> = acc.drain(..frame_len).collect();
+
+            let data = teltonika_parse_frame(&frame)?;
+            teltonika_print(&data);
+
+            let ack = (data.record_count as u32).to_be_bytes();
+            socket.write_all(&ack).await?;
+        }
     }
 }
