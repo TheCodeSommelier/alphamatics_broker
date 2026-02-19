@@ -5,5 +5,7 @@ edition = "2024"
 
 [dependencies]
 chrono = "0.4.43"
+dotenvy = "0.15.7"
 hex = "0.4.3"
+sentry = "0.46.2"
 tokio = { version = "1.48.0", features = ["full"] }
