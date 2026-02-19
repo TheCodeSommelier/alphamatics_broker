@@ -30,7 +30,6 @@ pub async fn teltonika_listen(
         let mut buf = [0u8; 4096];
         let n = socket.read(&mut buf).await?;
 
-        println!("N: {n}");
         if n == 0 {
             println!("Client disconnected: {:?}", peer_addr);
             return Ok(());
@@ -64,7 +63,14 @@ pub async fn teltonika_listen(
 
             let frame: Vec<u8> = acc.drain(..frame_len).collect();
 
-            let data = teltonika_parse_frame(&frame)?;
+            let data = match teltonika_parse_frame(&frame) {
+                Ok(data) => data,
+                Err(err) => {
+                    sentry::capture_error(&err);
+                    eprintln!("parse error: {err}");
+                    continue;
+                }
+            };
             teltonika_print(&data);
 
             let ack = (data.record_count as u32).to_be_bytes();

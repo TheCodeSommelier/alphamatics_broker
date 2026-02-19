@@ -8,10 +8,8 @@ use crate::units::teltonika::{
 pub fn teltonika_parse_frame(frame: &[u8]) -> io::Result<TeltonikaFrame> {
     // preamble(4) + data_len(4) + codec(1) + n1(1) + ... + n2(1) + crc(4)
     if frame.len() < 4 + 4 + 1 + 1 + 1 + 4 {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "frame too short",
-        ));
+        let err = io::Error::new(io::ErrorKind::UnexpectedEof, "frame too short");
+        return Err(err);
     }
 
     let data_len = u32::from_be_bytes(frame[4..8].try_into().unwrap()) as usize;
@@ -19,10 +17,11 @@ pub fn teltonika_parse_frame(frame: &[u8]) -> io::Result<TeltonikaFrame> {
     let data_start = 8;
     let data_end = data_start + data_len;
     if frame.len() < data_end + 4 {
-        return Err(io::Error::new(
+        let err = io::Error::new(
             io::ErrorKind::UnexpectedEof,
             "frame shorter than data_len+crc",
-        ));
+        );
+        return Err(err);
     }
 
     let codec_id = frame[data_start];
@@ -30,25 +29,21 @@ pub fn teltonika_parse_frame(frame: &[u8]) -> io::Result<TeltonikaFrame> {
     let record_count_2 = frame[data_end - 1];
     let crc_16 = u32::from_be_bytes(frame[data_end..data_end + 4].try_into().unwrap());
 
-    println!("Record count: {:?}", record_count);
-    println!("Record count 2: {:?}", record_count_2);
-
     // AVL payload sits between record_count and record_count_2
     let avl_bytes = &frame[data_start + 2..data_end - 1];
 
     // Codec 8 Extended should be 0x8E
     if codec_id != 0x8E {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
+        let err = io::Error::new(
+            io::ErrorKind::UnexpectedEof,
             format!("unexpected codec: {codec_id:#x}"),
-        ));
+        );
+        return Err(err);
     }
 
     if record_count != record_count_2 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "record_count != record_count_2",
-        ));
+        let err = io::Error::new(io::ErrorKind::InvalidData, "record_count != record_count_2");
+        return Err(err);
     }
 
     let mut cur = Cur::new(avl_bytes);
@@ -59,10 +54,11 @@ pub fn teltonika_parse_frame(frame: &[u8]) -> io::Result<TeltonikaFrame> {
     }
 
     if cur.remaining() != 0 {
-        return Err(io::Error::new(
+        let err = io::Error::new(
             io::ErrorKind::InvalidData,
             format!("extra bytes after parsing records: {}", cur.remaining()),
-        ));
+        );
+        return Err(err);
     }
 
     Ok(TeltonikaFrame {
@@ -167,10 +163,11 @@ fn parse_io_8e(cur: &mut Cur<'_>) -> io::Result<IoElementBlock> {
 
     let computed_total = (n1 + n2 + n4 + n8 + nx) as u16;
     if n_total != computed_total {
-        return Err(io::Error::new(
+        let err = io::Error::new(
             io::ErrorKind::InvalidData,
             format!("n_total mismatch: got {n_total}, computed {computed_total}"),
-        ));
+        );
+        return Err(err);
     }
 
     Ok(IoElementBlock {

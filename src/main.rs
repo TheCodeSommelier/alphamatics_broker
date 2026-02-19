@@ -15,9 +15,7 @@ async fn process_socket(mut socket: TcpStream) -> io::Result<()> {
     // TODO: Implement proper check with DB
     let accepted = imei.len() == 15;
 
-    teltonika_listen(socket, accepted, imei).await?;
-
-    Ok(())
+    teltonika_listen(socket, accepted, imei).await
 }
 
 async fn tokio_main() -> io::Result<()> {
