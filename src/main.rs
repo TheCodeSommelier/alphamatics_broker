@@ -1,4 +1,4 @@
-use std::{env, io};
+use std::io;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::units::teltonika::{teltonika_listen, utils::teltonika_read_imei};
@@ -41,7 +41,7 @@ async fn tokio_main() -> io::Result<()> {
 }
 fn main() {
     let _guard = sentry::init((
-        env::var("SETRY_DNS").expect("SETRY_DNS must be set"),
+        dotenvy::var("SENTRY_DSN").expect("SENTRY_DSN must be set"),
         sentry::ClientOptions {
             release: sentry::release_name!(),
             send_default_pii: true,
