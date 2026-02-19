@@ -165,10 +165,8 @@ fn parse_io_8e(cur: &mut Cur<'_>) -> io::Result<IoElementBlock> {
         x_bytes.insert(id, val);
     }
 
-    // sanity check (optional): total count should match sum of group counts
     let computed_total = (n1 + n2 + n4 + n8 + nx) as u16;
     if n_total != computed_total {
-        // Not necessarily fatal, but usually indicates mis-parse / wrong codec.
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("n_total mismatch: got {n_total}, computed {computed_total}"),
