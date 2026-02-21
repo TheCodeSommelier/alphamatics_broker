@@ -50,8 +50,9 @@ async fn tokio_main(pool: DbPool) -> io::Result<()> {
 fn main() {
     dotenvy::dotenv().ok();
 
+    let sentry_dns = dotenvy::var("SENTRY_DSN").expect("SENTRY_DSN must be set");
     let _guard = sentry::init((
-        dotenvy::var("SENTRY_DSN").expect("SENTRY_DSN must be set"),
+        sentry_dns,
         sentry::ClientOptions {
             release: sentry::release_name!(),
             send_default_pii: true,

@@ -4,9 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+diesel-async = { version = "0.7.4", features = [
+  "postgres",
+  "pool",
+  "deadpool",
+] }
 chrono = "0.4.43"
 diesel = { version = "2.3.6", features = ["postgres"] }
-diesel-async = { version = "0.7.4", features = ["postgres", "pool", "deadpool"] }
 dotenvy = "0.15.7"
 hex = "0.4.3"
 sentry = "0.46.2"

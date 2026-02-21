@@ -61,12 +61,11 @@ pub async fn imei_allowed(pool: &DbPool, imei: &str) -> io::Result<bool> {
         .await
         .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
-    let row: ExistsRow =
-        diesel::sql_query("SELECT EXISTS (SELECT 1 FROM ImeiAllowlist WHERE imei = $1)")
-            .bind::<Text, _>(imei)
-            .get_result(&mut conn)
-            .await
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+    let row: ExistsRow = diesel::sql_query("SELECT EXISTS (SELECT 1 FROM Unit WHERE imei = $1)")
+        .bind::<Text, _>(imei)
+        .get_result(&mut conn)
+        .await
+        .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
     Ok(row.exists)
 }
