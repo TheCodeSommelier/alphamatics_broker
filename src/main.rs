@@ -1,20 +1,23 @@
+use deadpool_postgres::Pool;
 use std::io;
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::db::{DbPool, build_pool, imei_allowed};
-use crate::units::teltonika::{teltonika_listen, utils::teltonika_read_imei};
+use crate::{
+    db::{build_pool, imei_allowed},
+    units::teltonika::{teltonika_listen, utils::teltonika_read_imei},
+};
 
 mod db;
 mod units;
 
-async fn process_socket(mut socket: TcpStream, pool: &DbPool) -> io::Result<()> {
+async fn process_socket(mut socket: TcpStream, pool: &Pool) -> io::Result<()> {
     let peer_addr = socket.peer_addr().ok();
     println!("Peer addr: {:?}", peer_addr);
 
     let imei = teltonika_read_imei(&mut socket).await?;
     println!("IMEI: {imei}");
 
-    let accepted = match imei_allowed(pool, &imei).await {
+    let accepted = match imei_allowed(&pool, &imei).await {
         Ok(allowed) => allowed,
         Err(err) => {
             sentry::capture_error(&err);
@@ -26,9 +29,10 @@ async fn process_socket(mut socket: TcpStream, pool: &DbPool) -> io::Result<()> 
     teltonika_listen(socket, accepted, imei).await
 }
 
-async fn tokio_main(pool: DbPool) -> io::Result<()> {
+async fn tokio_main() -> io::Result<()> {
     let addr = "127.0.0.1:4001";
     let listener = TcpListener::bind(addr).await?;
+    let pool = build_pool()?;
 
     loop {
         println!("Listening on: {addr}");
@@ -61,22 +65,12 @@ fn main() {
         },
     ));
 
-    let database_url = dotenvy::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = match build_pool(&database_url) {
-        Ok(pool) => pool,
-        Err(err) => {
-            sentry::capture_error(&err);
-            eprintln!("db pool error: {err}");
-            return;
-        }
-    };
-
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(async {
-            let result = tokio_main(pool).await;
+            let result = tokio_main().await;
             if let Err(err) = &result {
                 sentry::capture_error(err);
             }

@@ -1,71 +1,64 @@
 use std::io;
 
-use diesel::prelude::QueryableByName;
-use diesel::sql_types::{Bool, Text};
-use diesel_async::pooled_connection::deadpool::Pool;
-use diesel_async::pooled_connection::{AsyncDieselConnectionManager, ManagerConfig};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use rustls::{ClientConfig, RootCertStore};
-use tokio_postgres_rustls::MakeRustlsConnect;
+use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
+use openssl::ssl::{SslConnector, SslMethod};
+use postgres_openssl::MakeTlsConnector;
+use tokio_postgres::{Config, Error as PgError};
 
-pub type DbPool = Pool<AsyncPgConnection>;
+fn pg_to_io(context: &'static str, e: PgError) -> io::Error {
+    eprintln!("{context}: {e:?}");
 
-#[derive(QueryableByName)]
-struct ExistsRow {
-    #[diesel(sql_type = Bool)]
-    exists: bool,
+    if let Some(db) = e.as_db_error() {
+        eprintln!("  pg code: {:?}", db.code());
+        eprintln!("  pg msg : {}", db.message());
+        if let Some(detail) = db.detail() {
+            eprintln!("  detail : {detail}");
+        }
+        if let Some(hint) = db.hint() {
+            eprintln!("  hint   : {hint}");
+        }
+    }
+    io::Error::new(io::ErrorKind::Other, e.to_string())
 }
 
-fn bad_conn<E: std::fmt::Display>(err: E) -> diesel::ConnectionError {
-    diesel::ConnectionError::BadConnection(err.to_string())
+fn other<E: std::fmt::Display>(e: E) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, e.to_string())
 }
 
-pub fn build_pool(database_url: &str) -> io::Result<DbPool> {
-    let mut mgr_cfg = ManagerConfig::<AsyncPgConnection>::default();
-    mgr_cfg.custom_setup = Box::new(|url| {
-        Box::pin(async move {
-            let mut roots = RootCertStore::empty();
-            let certs = rustls_native_certs::load_native_certs();
-            for cert in certs.certs {
-                roots.add(cert).map_err(bad_conn)?;
-            }
-            if !certs.errors.is_empty() {
-                eprintln!(
-                    "warning: {} native cert(s) failed to load",
-                    certs.errors.len()
-                );
-            }
+pub type DbPool = Pool;
 
-            let tls = MakeRustlsConnect::new(
-                ClientConfig::builder()
-                    .with_root_certificates(roots)
-                    .with_no_client_auth(),
-            );
+pub fn build_pool() -> io::Result<DbPool> {
+    let db_url = dotenvy::var("DATABASE_URL").map_err(other)?;
 
-            let (client, connection) = tokio_postgres::connect(url, tls).await.map_err(bad_conn)?;
+    let pg_cfg: Config = db_url.parse().map_err(other)?;
 
-            AsyncPgConnection::try_from_client_and_connection(client, connection).await
-        })
-    });
+    let builder = SslConnector::builder(SslMethod::tls()).map_err(other)?;
+    let connector = MakeTlsConnector::new(builder.build());
 
-    let config =
-        AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_config(database_url, mgr_cfg);
-    Pool::builder(config)
-        .build()
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err))
+    let mgr_config = ManagerConfig {
+        recycling_method: RecyclingMethod::Fast,
+    };
+
+    let mgr = Manager::from_config(pg_cfg, connector, mgr_config);
+
+    Pool::builder(mgr).max_size(8).build().map_err(other)
 }
 
 pub async fn imei_allowed(pool: &DbPool, imei: &str) -> io::Result<bool> {
-    let mut conn = pool
-        .get()
-        .await
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+    let imei = imei.trim();
+    if imei.is_empty() {
+        return Ok(false);
+    }
 
-    let row: ExistsRow = diesel::sql_query("SELECT EXISTS (SELECT 1 FROM Unit WHERE imei = $1)")
-        .bind::<Text, _>(imei)
-        .get_result(&mut conn)
-        .await
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+    let client = pool.get().await.map_err(other)?;
 
-    Ok(row.exists)
+    let row = client
+        .query_one(
+            r#"SELECT EXISTS (SELECT 1 FROM "Unit" WHERE imei = $1)"#,
+            &[&imei],
+        )
+        .await
+        .map_err(|e| pg_to_io("imei err: ", e))?;
+
+    Ok(row.get(0))
 }
