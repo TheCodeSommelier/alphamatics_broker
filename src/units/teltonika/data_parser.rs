@@ -1,11 +1,11 @@
 use std::{collections::BTreeMap, io, u8};
 
-use crate::units::teltonika::{
-    types::{AvlData, GpsElementBlock, IoElementBlock, TeltonikaFrame},
+use crate::units::{
+    teltonika::types::{AvlData, GpsElementBlock, IoElementBlock, TeltonikaFrame},
     utils::Cur,
 };
 
-pub fn teltonika_parse_frame(frame: &[u8]) -> io::Result<TeltonikaFrame> {
+pub fn teltonika_parse_frame(frame: &[u8], imei: &String) -> io::Result<TeltonikaFrame> {
     // preamble(4) + data_len(4) + codec(1) + n1(1) + ... + n2(1) + crc(4)
     if frame.len() < 4 + 4 + 1 + 1 + 1 + 4 {
         let err = io::Error::new(io::ErrorKind::UnexpectedEof, "frame too short");
@@ -62,6 +62,7 @@ pub fn teltonika_parse_frame(frame: &[u8]) -> io::Result<TeltonikaFrame> {
     }
 
     Ok(TeltonikaFrame {
+        imei: imei.to_string(),
         data_field_length: data_len as u32,
         codec_id,
         record_count,

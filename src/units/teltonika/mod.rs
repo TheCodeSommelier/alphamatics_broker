@@ -68,7 +68,7 @@ pub async fn teltonika_listen(
 
             let frame: Vec<u8> = acc.drain(..frame_len).collect();
 
-            let data = match teltonika_parse_frame(&frame) {
+            let data = match teltonika_parse_frame(&frame, &imei) {
                 Ok(data) => data,
                 Err(err) => {
                     sentry::capture_error(&err);
