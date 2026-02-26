@@ -1,10 +1,14 @@
 use std::io;
 
+use async_nats::jetstream::Context;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::units::teltonika::{
-    data_parser::teltonika_parse_frame,
-    utils::{teltonika_print, teltonika_write_imei_handshake},
+use crate::{
+    nats::nats_publish,
+    units::teltonika::{
+        data_parser::teltonika_parse_frame,
+        utils::{teltonika_print, teltonika_write_imei_handshake},
+    },
 };
 
 pub mod data_parser;
@@ -15,6 +19,7 @@ pub async fn teltonika_listen(
     mut socket: tokio::net::TcpStream,
     accepted: bool,
     imei: String,
+    jetstream: &Context,
 ) -> io::Result<()> {
     let peer_addr = socket.peer_addr().ok();
     teltonika_write_imei_handshake(&mut socket, accepted).await?;
@@ -71,6 +76,7 @@ pub async fn teltonika_listen(
                     continue;
                 }
             };
+            nats_publish(jetstream, &data, &imei).await?;
             teltonika_print(&data);
 
             let ack = (data.record_count as u32).to_be_bytes();
