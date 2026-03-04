@@ -1,17 +1,16 @@
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone)]
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
 pub struct TeltonikaFrame {
-    pub data_field_length: u32,
+    pub imei: String,
     pub codec_id: u8,
     pub record_count: u8,
     pub records: Vec<AvlData>,
-    /// Must equal record_count
-    pub record_count_2: u8,
-    pub crc_16: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AvlData {
     pub timestamp: u64, // epoch ms
     pub priority: u8,
@@ -19,7 +18,7 @@ pub struct AvlData {
     pub io_element: IoElementBlock,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GpsElementBlock {
     pub longitude: i32,
     pub latitude: i32,
@@ -29,7 +28,7 @@ pub struct GpsElementBlock {
     pub speed: u16,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct IoElementBlock {
     pub event_io_id: u16, // u16 for 8E (safe even if you don't use it yet)
     pub n_total: u16,

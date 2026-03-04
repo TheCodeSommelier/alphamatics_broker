@@ -1,9 +1,13 @@
+mod types;
+
 use std::io;
 
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use openssl::ssl::{SslConnector, SslMethod};
 use postgres_openssl::MakeTlsConnector;
 use tokio_postgres::{Config, Error as PgError};
+
+pub use self::types::UnitMake;
 
 fn pg_to_io(context: &'static str, e: PgError) -> io::Error {
     eprintln!("{context}: {e:?}");
@@ -44,21 +48,25 @@ pub fn build_pool() -> io::Result<DbPool> {
     Pool::builder(mgr).max_size(8).build().map_err(other)
 }
 
-pub async fn imei_allowed(pool: &DbPool, imei: &str) -> io::Result<bool> {
+// !! If you remove this check you will be excuted at dawn !!
+// We dropped FKs in avl data cuz we have this. Do not muck about with this.
+pub async fn get_unit_make(pool: &DbPool, imei: &str) -> io::Result<Option<UnitMake>> {
     let imei = imei.trim();
     if imei.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
 
     let client = pool.get().await.map_err(other)?;
 
-    let row = client
-        .query_one(
-            r#"SELECT EXISTS (SELECT 1 FROM "Unit" WHERE imei = $1)"#,
-            &[&imei],
-        )
+    let row_opt = client
+        .query_opt(r#"SELECT make::text FROM "Unit" WHERE imei = $1"#, &[&imei])
         .await
-        .map_err(|e| pg_to_io("imei err: ", e))?;
+        .map_err(|e| pg_to_io("imei/make lookup err: ", e))?;
 
-    Ok(row.get(0))
+    let Some(row) = row_opt else {
+        return Ok(None);
+    };
+
+    let make_str: String = row.get(0);
+    Ok(UnitMake::from_db(&make_str))
 }

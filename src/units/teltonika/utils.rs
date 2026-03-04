@@ -1,5 +1,7 @@
+use std::i64;
 use std::io::{Error, ErrorKind, Result};
 
+use chrono::DateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -44,11 +46,8 @@ pub fn teltonika_print(data: &TeltonikaFrame) {
     println!("============ Start ============");
 
     println!("\n======= Teltonika =======");
-    println!("field length: {:?}", data.data_field_length);
-    println!("codec id: 0x{:02X}", data.codec_id);
     println!("num of data 1: {:?}", data.record_count);
-    println!("num of data 2: {:?}", data.record_count_2);
-    println!("crc 16: {:?}", data.crc_16);
+    println!("codec_id: {:?}", data.codec_id);
 
     println!("\n======= Records =======");
     let records = &data.records;
@@ -56,6 +55,7 @@ pub fn teltonika_print(data: &TeltonikaFrame) {
     for avl_data in records.iter().enumerate() {
         println!("\n======= AVL generic {:?} =======", avl_data.0);
         println!("Timestamp: {:?}", avl_data.1.timestamp);
+        println!("Time and date: {:?}", DateTime::from_timestamp_millis(avl_data.1.timestamp as i64));
         println!("Priority: {:?}", avl_data.1.priority);
 
         println!("\n======= GPS {:?} =======", avl_data.0);
@@ -76,70 +76,4 @@ pub fn teltonika_print(data: &TeltonikaFrame) {
         println!("x_bytes: {:?}", avl_data.1.io_element.x_bytes);
     }
     println!("\n============ END ============");
-}
-
-// ===================
-//       Cursor
-// ===================
-
-pub struct Cur<'a> {
-    b: &'a [u8],
-    i: usize,
-}
-
-impl<'a> Cur<'a> {
-    pub fn new(b: &'a [u8]) -> Self {
-        Self { b, i: 0 }
-    }
-
-    pub fn _pos(&self) -> usize {
-        self.i
-    }
-
-    pub fn remaining(&self) -> usize {
-        self.b.len().saturating_sub(self.i)
-    }
-
-    pub fn need(&self, n: usize) -> Result<()> {
-        if self.remaining() < n {
-            return Err(Error::new(ErrorKind::UnexpectedEof, "not enough bytes"));
-        }
-        Ok(())
-    }
-
-    pub fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        self.need(n)?;
-        let s = &self.b[self.i..self.i + n];
-        self.i += n;
-        Ok(s)
-    }
-
-    pub fn u8(&mut self) -> Result<u8> {
-        Ok(self.take(1)?[0])
-    }
-
-    pub fn u16(&mut self) -> Result<u16> {
-        let s = self.take(2)?;
-        Ok(u16::from_be_bytes([s[0], s[1]]))
-    }
-
-    pub fn u32(&mut self) -> Result<u32> {
-        let s = self.take(4)?;
-        Ok(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
-    }
-
-    pub fn u64(&mut self) -> Result<u64> {
-        let s = self.take(8)?;
-        Ok(u64::from_be_bytes([
-            s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
-        ]))
-    }
-
-    pub fn i32(&mut self) -> Result<i32> {
-        Ok(i32::from_be_bytes(self.take(4)?.try_into().unwrap()))
-    }
-
-    pub fn i16(&mut self) -> Result<i16> {
-        Ok(i16::from_be_bytes(self.take(2)?.try_into().unwrap()))
-    }
 }

@@ -1,11 +1,11 @@
 use std::{collections::BTreeMap, io, u8};
 
-use crate::units::teltonika::{
-    types::{AvlData, GpsElementBlock, IoElementBlock, TeltonikaFrame},
+use crate::units::{
+    teltonika::types::{AvlData, GpsElementBlock, IoElementBlock, TeltonikaFrame},
     utils::Cur,
 };
 
-pub fn teltonika_parse_frame(frame: &[u8]) -> io::Result<TeltonikaFrame> {
+pub fn teltonika_parse_frame(frame: &[u8], imei: &String) -> io::Result<TeltonikaFrame> {
     // preamble(4) + data_len(4) + codec(1) + n1(1) + ... + n2(1) + crc(4)
     if frame.len() < 4 + 4 + 1 + 1 + 1 + 4 {
         let err = io::Error::new(io::ErrorKind::UnexpectedEof, "frame too short");
@@ -27,7 +27,6 @@ pub fn teltonika_parse_frame(frame: &[u8]) -> io::Result<TeltonikaFrame> {
     let codec_id = frame[data_start];
     let record_count = frame[data_start + 1];
     let record_count_2 = frame[data_end - 1];
-    let crc_16 = u32::from_be_bytes(frame[data_end..data_end + 4].try_into().unwrap());
 
     // AVL payload sits between record_count and record_count_2
     let avl_bytes = &frame[data_start + 2..data_end - 1];
@@ -62,12 +61,10 @@ pub fn teltonika_parse_frame(frame: &[u8]) -> io::Result<TeltonikaFrame> {
     }
 
     Ok(TeltonikaFrame {
-        data_field_length: data_len as u32,
+        imei: imei.to_string(),
         codec_id,
         record_count,
         records,
-        record_count_2,
-        crc_16,
     })
 }
 
