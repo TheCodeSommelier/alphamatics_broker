@@ -9,6 +9,7 @@ use crate::{
         data_parser::teltonika_parse_frame,
         utils::{teltonika_print, teltonika_write_imei_handshake},
     },
+    db::UnitMake,
 };
 
 pub mod data_parser;
@@ -20,6 +21,7 @@ pub async fn teltonika_listen(
     accepted: bool,
     imei: String,
     jetstream: &Context,
+    make: UnitMake
 ) -> io::Result<()> {
     let peer_addr = socket.peer_addr().ok();
     teltonika_write_imei_handshake(&mut socket, accepted).await?;
@@ -76,7 +78,7 @@ pub async fn teltonika_listen(
                     continue;
                 }
             };
-            nats_publish(jetstream, &data, &imei).await?;
+            nats_publish(jetstream, &data, &imei, make).await?;
             teltonika_print(&data);
 
             let ack = (data.record_count as u32).to_be_bytes();

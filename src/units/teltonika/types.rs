@@ -5,13 +5,9 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize)]
 pub struct TeltonikaFrame {
     pub imei: String,
-    pub data_field_length: u32,
     pub codec_id: u8,
     pub record_count: u8,
     pub records: Vec<AvlData>,
-    /// Must equal record_count
-    pub record_count_2: u8,
-    pub crc_16: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]

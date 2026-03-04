@@ -27,7 +27,6 @@ pub fn teltonika_parse_frame(frame: &[u8], imei: &String) -> io::Result<Teltonik
     let codec_id = frame[data_start];
     let record_count = frame[data_start + 1];
     let record_count_2 = frame[data_end - 1];
-    let crc_16 = u32::from_be_bytes(frame[data_end..data_end + 4].try_into().unwrap());
 
     // AVL payload sits between record_count and record_count_2
     let avl_bytes = &frame[data_start + 2..data_end - 1];
@@ -63,12 +62,9 @@ pub fn teltonika_parse_frame(frame: &[u8], imei: &String) -> io::Result<Teltonik
 
     Ok(TeltonikaFrame {
         imei: imei.to_string(),
-        data_field_length: data_len as u32,
         codec_id,
         record_count,
         records,
-        record_count_2,
-        crc_16,
     })
 }
 

@@ -1,5 +1,7 @@
+use std::i64;
 use std::io::{Error, ErrorKind, Result};
 
+use chrono::DateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -44,11 +46,8 @@ pub fn teltonika_print(data: &TeltonikaFrame) {
     println!("============ Start ============");
 
     println!("\n======= Teltonika =======");
-    println!("field length: {:?}", data.data_field_length);
-    println!("codec id: 0x{:02X}", data.codec_id);
     println!("num of data 1: {:?}", data.record_count);
-    println!("num of data 2: {:?}", data.record_count_2);
-    println!("crc 16: {:?}", data.crc_16);
+    println!("codec_id: {:?}", data.codec_id);
 
     println!("\n======= Records =======");
     let records = &data.records;
@@ -56,6 +55,7 @@ pub fn teltonika_print(data: &TeltonikaFrame) {
     for avl_data in records.iter().enumerate() {
         println!("\n======= AVL generic {:?} =======", avl_data.0);
         println!("Timestamp: {:?}", avl_data.1.timestamp);
+        println!("Time and date: {:?}", DateTime::from_timestamp_millis(avl_data.1.timestamp as i64));
         println!("Priority: {:?}", avl_data.1.priority);
 
         println!("\n======= GPS {:?} =======", avl_data.0);

@@ -4,7 +4,7 @@ use std::io;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::{
-    db::{build_pool, imei_allowed},
+    db::{build_pool, get_unit_make},
     nats::nats_connect,
     units::teltonika::{teltonika_listen, utils::teltonika_read_imei},
 };
@@ -13,23 +13,25 @@ mod db;
 mod nats;
 mod units;
 
-async fn process_socket(mut socket: TcpStream, pool: &Pool, jetstream: &Context) -> io::Result<()> {
+async fn process_socket(
+    mut socket: TcpStream,
+    pool: &Pool,
+    jetstream: &Context,
+) -> io::Result<()> {
     let peer_addr = socket.peer_addr().ok();
     println!("Peer addr: {:?}", peer_addr);
 
     let imei = teltonika_read_imei(&mut socket).await?;
     println!("IMEI: {imei}");
 
-    let accepted = match imei_allowed(&pool, &imei).await {
-        Ok(allowed) => allowed,
-        Err(err) => {
-            sentry::capture_error(&err);
-            eprintln!("imei lookup error: {err}");
-            false
-        }
+    let make = match get_unit_make(&pool, &imei).await {
+        Ok(Some(make)) => make,
+        Ok(None) => return Ok(()),
+        Err(err) => { sentry::capture_error(&err); eprintln!("imei lookup error: {err}"); return Ok(()); }
     };
 
-    teltonika_listen(socket, accepted, imei, jetstream).await
+    let accepted = true;
+    teltonika_listen(socket, accepted, imei, jetstream, make).await
 }
 
 async fn tokio_main() -> io::Result<()> {
