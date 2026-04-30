@@ -50,6 +50,6 @@ jobs:
               | docker login --username AWS --password-stdin ${{ steps.ecr.outputs.registry }}
 
             cd /opt/broker
-            docker compose pull server
-            docker compose up -d server
+            docker compose pull broker
+            docker compose up -d broker
             docker image prune -f
