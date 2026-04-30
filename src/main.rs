@@ -13,11 +13,7 @@ mod db;
 mod nats;
 mod units;
 
-async fn process_socket(
-    mut socket: TcpStream,
-    pool: &Pool,
-    jetstream: &Context,
-) -> io::Result<()> {
+async fn process_socket(mut socket: TcpStream, pool: &Pool, jetstream: &Context) -> io::Result<()> {
     let peer_addr = socket.peer_addr().ok();
     println!("Peer addr: {:?}", peer_addr);
 
@@ -27,7 +23,11 @@ async fn process_socket(
     let make = match get_unit_make(&pool, &imei).await {
         Ok(Some(make)) => make,
         Ok(None) => return Ok(()),
-        Err(err) => { sentry::capture_error(&err); eprintln!("imei lookup error: {err}"); return Ok(()); }
+        Err(err) => {
+            sentry::capture_error(&err);
+            eprintln!("imei lookup error: {err}");
+            return Ok(());
+        }
     };
 
     let accepted = true;
@@ -35,10 +35,14 @@ async fn process_socket(
 }
 
 async fn tokio_main() -> io::Result<()> {
-    let addr = "127.0.0.1:4001";
-    let listener = TcpListener::bind(addr).await?;
+    let addr = dotenvy::var("ADDR").unwrap_or("127.0.0.1:4001".to_string());
+    println!("Binding broker listener on {addr}...");
+    let listener = TcpListener::bind(&addr).await?;
+    println!("Building database pool...");
     let pool = build_pool()?;
+    println!("Connecting to NATS...");
     let jetstream = nats_connect().await?;
+    println!("Broker listening on {addr}");
 
     loop {
         let (socket, _) = listener.accept().await?;
@@ -53,7 +57,8 @@ async fn tokio_main() -> io::Result<()> {
         });
     }
 }
-fn main() {
+
+fn main() -> io::Result<()> {
     dotenvy::dotenv().ok();
 
     let sentry_dns = dotenvy::var("SENTRY_DSN").expect("SENTRY_DSN must be set");
@@ -67,14 +72,16 @@ fn main() {
         },
     ));
 
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .unwrap()
-        .block_on(async {
-            let result = tokio_main().await;
-            if let Err(err) = &result {
-                sentry::capture_error(err);
-            }
-        });
+        .map_err(io::Error::other)?;
+
+    if let Err(err) = runtime.block_on(tokio_main()) {
+        sentry::capture_error(&err);
+        eprintln!("broker failed to start: {err}");
+        return Err(err);
+    }
+
+    Ok(())
 }
