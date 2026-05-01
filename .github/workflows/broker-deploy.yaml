@@ -49,7 +49,10 @@ jobs:
             aws ecr get-login-password --region ${{ secrets.AWS_REGION }} \
               | docker login --username AWS --password-stdin ${{ steps.ecr.outputs.registry }}
 
+            echo "BROKER_IMAGE=${{ steps.ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ github.ref_name }}" \
+              | sudo tee /opt/broker/.image.env
+
             cd /opt/broker
-            docker compose pull broker
-            docker compose up -d broker
+            docker compose --env-file .image.env pull broker
+            docker compose --env-file .image.env up -d broker
             docker image prune -f
