@@ -61,10 +61,13 @@ async fn tokio_main() -> io::Result<()> {
 fn main() -> io::Result<()> {
     dotenvy::dotenv().ok();
 
+    let environment = dotenvy::var("ENV")
+        .unwrap_or("production".to_string());
     let sentry_dns = dotenvy::var("SENTRY_DSN").expect("SENTRY_DSN must be set");
     let _guard = sentry::init((
         sentry_dns,
         sentry::ClientOptions {
+            environment: Some(environment.into()),
             release: sentry::release_name!(),
             send_default_pii: true,
             traces_sample_rate: 0.1,
