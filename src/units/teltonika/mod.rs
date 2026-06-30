@@ -1,27 +1,30 @@
 use std::io;
 
 use async_nats::jetstream::Context;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 
 use crate::{
+    db::UnitMake,
     nats::nats_publish,
     units::teltonika::{
         data_parser::teltonika_parse_frame,
-        utils::{teltonika_print, teltonika_write_imei_handshake},
+        errors::TeltonikaFrameError,
+        utils::{teltonika_print, teltonika_write_frame_ack, teltonika_write_imei_handshake},
     },
-    db::UnitMake,
 };
 
 pub mod data_parser;
+pub mod errors;
 pub mod types;
 pub mod utils;
+pub mod validations;
 
 pub async fn teltonika_listen(
     mut socket: tokio::net::TcpStream,
     accepted: bool,
     imei: String,
     jetstream: &Context,
-    make: UnitMake
+    make: UnitMake,
 ) -> io::Result<()> {
     let peer_addr = socket.peer_addr().ok();
     teltonika_write_imei_handshake(&mut socket, accepted).await?;
@@ -73,16 +76,25 @@ pub async fn teltonika_listen(
             let data = match teltonika_parse_frame(&frame, &imei) {
                 Ok(data) => data,
                 Err(err) => {
-                    sentry::capture_error(&err);
-                    eprintln!("parse error: {err}");
+                    if let Some(ack_record_count) = err.ack_record_count() {
+                        eprintln!("discarded frame: {err}");
+                        teltonika_write_frame_ack(&mut socket, ack_record_count).await?;
+                    } else {
+                        match err {
+                            TeltonikaFrameError::Parse(err) => {
+                                sentry::capture_error(&err);
+                                eprintln!("parse error: {err}");
+                            }
+                            TeltonikaFrameError::Discarded { .. } => unreachable!(),
+                        }
+                    }
                     continue;
                 }
             };
             nats_publish(jetstream, &data, &imei, make).await?;
             teltonika_print(&data);
 
-            let ack = (data.record_count as u32).to_be_bytes();
-            socket.write_all(&ack).await?;
+            teltonika_write_frame_ack(&mut socket, data.record_count).await?;
         }
     }
 }

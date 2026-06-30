@@ -24,7 +24,7 @@ pub async fn nats_publish(
     jetstream: &Context,
     data: &TeltonikaFrame,
     imei: &str,
-    make: UnitMake
+    make: UnitMake,
 ) -> io::Result<()> {
     let subject = format!("units.avl.{:?}.{imei}", make);
 

@@ -42,6 +42,13 @@ pub async fn teltonika_write_imei_handshake(stream: &mut TcpStream, accepted: bo
     Ok(())
 }
 
+pub async fn teltonika_write_frame_ack(stream: &mut TcpStream, record_count: u8) -> Result<()> {
+    let ack = (record_count as u32).to_be_bytes();
+    stream.write_all(&ack).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
 pub fn teltonika_print(data: &TeltonikaFrame) {
     println!("============ Start ============");
 
@@ -55,7 +62,10 @@ pub fn teltonika_print(data: &TeltonikaFrame) {
     for avl_data in records.iter().enumerate() {
         println!("\n======= AVL generic {:?} =======", avl_data.0);
         println!("Timestamp: {:?}", avl_data.1.timestamp);
-        println!("Time and date: {:?}", DateTime::from_timestamp_millis(avl_data.1.timestamp as i64));
+        println!(
+            "Time and date: {:?}",
+            DateTime::from_timestamp_millis(avl_data.1.timestamp as i64)
+        );
         println!("Priority: {:?}", avl_data.1.priority);
 
         println!("\n======= GPS {:?} =======", avl_data.0);

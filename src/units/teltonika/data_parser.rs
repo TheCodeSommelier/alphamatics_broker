@@ -1,15 +1,20 @@
 use std::{collections::BTreeMap, io, u8};
 
 use crate::units::{
+    teltonika::errors::{DiscardReason, TeltonikaFrameError},
     teltonika::types::{AvlData, GpsElementBlock, IoElementBlock, TeltonikaFrame},
+    teltonika::validations::{TimestampValidationError, validate_timestamp},
     utils::Cur,
 };
 
-pub fn teltonika_parse_frame(frame: &[u8], imei: &String) -> io::Result<TeltonikaFrame> {
+pub fn teltonika_parse_frame(
+    frame: &[u8],
+    imei: &str,
+) -> Result<TeltonikaFrame, TeltonikaFrameError> {
     // preamble(4) + data_len(4) + codec(1) + n1(1) + ... + n2(1) + crc(4)
     if frame.len() < 4 + 4 + 1 + 1 + 1 + 4 {
         let err = io::Error::new(io::ErrorKind::UnexpectedEof, "frame too short");
-        return Err(err);
+        return Err(err.into());
     }
 
     let data_len = u32::from_be_bytes(frame[4..8].try_into().unwrap()) as usize;
@@ -21,7 +26,7 @@ pub fn teltonika_parse_frame(frame: &[u8], imei: &String) -> io::Result<Teltonik
             io::ErrorKind::UnexpectedEof,
             "frame shorter than data_len+crc",
         );
-        return Err(err);
+        return Err(err.into());
     }
 
     let codec_id = frame[data_start];
@@ -37,19 +42,19 @@ pub fn teltonika_parse_frame(frame: &[u8], imei: &String) -> io::Result<Teltonik
             io::ErrorKind::UnexpectedEof,
             format!("unexpected codec: {codec_id:#x}"),
         );
-        return Err(err);
+        return Err(err.into());
     }
 
     if record_count != record_count_2 {
         let err = io::Error::new(io::ErrorKind::InvalidData, "record_count != record_count_2");
-        return Err(err);
+        return Err(err.into());
     }
 
     let mut cur = Cur::new(avl_bytes);
     let mut records = Vec::with_capacity(record_count as usize);
 
     for _ in 0..record_count {
-        records.push(parse_avl_record_8e(&mut cur)?);
+        records.push(parse_avl_record_8e(&mut cur, record_count)?);
     }
 
     if cur.remaining() != 0 {
@@ -57,7 +62,7 @@ pub fn teltonika_parse_frame(frame: &[u8], imei: &String) -> io::Result<Teltonik
             io::ErrorKind::InvalidData,
             format!("extra bytes after parsing records: {}", cur.remaining()),
         );
-        return Err(err);
+        return Err(err.into());
     }
 
     Ok(TeltonikaFrame {
@@ -72,9 +77,22 @@ pub fn teltonika_parse_frame(frame: &[u8], imei: &String) -> io::Result<Teltonik
 //         Private
 // ========================
 
-fn parse_avl_record_8e(cur: &mut Cur<'_>) -> io::Result<AvlData> {
+fn parse_avl_record_8e(
+    cur: &mut Cur<'_>,
+    ack_record_count: u8,
+) -> Result<AvlData, TeltonikaFrameError> {
     // Timestamp(8) Priority(1) GPS(15) IO(variable)
     let timestamp = cur.u64()?;
+    match validate_timestamp(timestamp) {
+        Ok(()) => {}
+        Err(TimestampValidationError::TooFarInFuture(err)) => {
+            return Err(TeltonikaFrameError::Discarded {
+                ack_record_count,
+                reason: DiscardReason::FutureTimestamp(err),
+            });
+        }
+        Err(TimestampValidationError::Clock(err)) => return Err(err.into()),
+    }
     let priority = cur.u8()?;
     let gps_element = parse_gps(cur)?;
     let io_element = parse_io_8e(cur)?;
