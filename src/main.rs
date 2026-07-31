@@ -51,7 +51,7 @@ async fn tokio_main() -> io::Result<()> {
     println!("Connecting to NATS...");
     let jetstream = nats_connect().await?;
     println!("Connecting to Redis...");
-    let command_queue = CommandQueue::connect().await?;
+    let command_queue = CommandQueue::connect()?;
     let command_listener = run_command_listener(jetstream.clone(), command_queue.clone());
 
     tokio::spawn(async move {

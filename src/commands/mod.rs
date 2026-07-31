@@ -9,7 +9,7 @@ use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use crate::redis::{RedisConnection, redis_connect};
+use crate::redis::{RedisClient, redis_connect};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommandPayload {
@@ -38,23 +38,30 @@ pub struct CommandResponsePayload {
 
 #[derive(Clone)]
 pub struct CommandQueue {
-    redis: RedisConnection,
+    redis: RedisClient,
     notify: Arc<Notify>,
 }
 
 impl CommandQueue {
-    pub async fn connect() -> io::Result<Self> {
+    pub fn connect() -> io::Result<Self> {
         Ok(Self {
-            redis: redis_connect().await?,
+            redis: redis_connect()?,
             notify: Arc::new(Notify::new()),
         })
     }
 
-    pub async fn enqueue(&self, command: QueuedCommand) -> usize {
-        let mut redis = self.redis.clone();
+    async fn connection(&self) -> io::Result<redis::aio::MultiplexedConnection> {
+        self.redis
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(io::Error::other)
+    }
+
+    pub async fn enqueue(&self, command: QueuedCommand) -> io::Result<usize> {
+        let mut redis = self.connection().await?;
         let payload_key = command_payload_key(&command.imei, &command.request_id);
         let queue_key = command_queue_key(&command.imei);
-        let payload = serde_json::to_string(&command).expect("queued command to serialize");
+        let payload = serde_json::to_string(&command).map_err(io::Error::other)?;
         let _: () = redis::pipe()
             .atomic()
             .cmd("SET")
@@ -67,28 +74,36 @@ impl CommandQueue {
             .ignore()
             .query_async(&mut redis)
             .await
-            .expect("redis enqueue to succeed");
-        let len: usize = redis.llen(&queue_key).await.expect("redis llen to succeed");
+            .map_err(io::Error::other)?;
+        let len: usize = redis.llen(&queue_key).await.map_err(io::Error::other)?;
         self.notify.notify_waiters();
-        len
+        Ok(len)
     }
 
-    pub async fn peek(&self, imei: &str) -> Option<QueuedCommand> {
-        let mut redis = self.redis.clone();
+    pub async fn peek(&self, imei: &str) -> io::Result<Option<QueuedCommand>> {
+        let mut redis = self.connection().await?;
         let queue_key = command_queue_key(imei);
         let req_id: Option<String> = redis
             .lindex(&queue_key, 0)
             .await
-            .expect("redis lindex to succeed");
-        let req_id = req_id?;
+            .map_err(io::Error::other)?;
+        let Some(req_id) = req_id else {
+            return Ok(None);
+        };
         let payload_key = command_payload_key(imei, &req_id);
-        let payload: Option<String> = redis.get(&payload_key).await.expect("redis get to succeed");
-        payload.and_then(|payload| serde_json::from_str(&payload).ok())
+        let payload: Option<String> = redis.get(&payload_key).await.map_err(io::Error::other)?;
+        let payload = payload
+            .map(|payload| serde_json::from_str(&payload).map_err(io::Error::other))
+            .transpose()?;
+
+        Ok(payload)
     }
 
-    pub async fn remove_front(&self, imei: &str) -> Option<QueuedCommand> {
-        let command = self.peek(imei).await?;
-        let mut redis = self.redis.clone();
+    pub async fn remove_front(&self, imei: &str) -> io::Result<Option<QueuedCommand>> {
+        let Some(command) = self.peek(imei).await? else {
+            return Ok(None);
+        };
+        let mut redis = self.connection().await?;
         let queue_key = command_queue_key(imei);
         let payload_key = command_payload_key(imei, &command.request_id);
         let _: () = redis::pipe()
@@ -101,23 +116,25 @@ impl CommandQueue {
             .ignore()
             .query_async(&mut redis)
             .await
-            .expect("redis remove_front to succeed");
-        Some(command)
+            .map_err(io::Error::other)?;
+        Ok(Some(command))
     }
 
-    pub async fn has_pending(&self, imei: &str) -> bool {
-        let mut redis = self.redis.clone();
+    pub async fn has_pending(&self, imei: &str) -> io::Result<bool> {
+        let mut redis = self.connection().await?;
         let len: usize = redis
             .llen(command_queue_key(imei))
             .await
-            .expect("redis llen to succeed");
-        len > 0
+            .map_err(io::Error::other)?;
+        Ok(len > 0)
     }
 
-    pub async fn wait_for_command(&self, imei: &str) {
-        while !self.has_pending(imei).await {
+    pub async fn wait_for_command(&self, imei: &str) -> io::Result<()> {
+        while !self.has_pending(imei).await? {
             self.notify.notified().await;
         }
+
+        Ok(())
     }
 }
 
@@ -156,11 +173,10 @@ pub async fn run_command_listener(jetstream: Context, command_queue: CommandQueu
     while let Some(message) = messages.next().await {
         let message = message.map_err(io::Error::other)?;
 
-        if let Err(err) =
-            handle_message(&command_queue, message.subject.as_str(), &message.payload).await
-        {
+        if let Err(err) = handle_message(&command_queue, message.subject.as_str(), &message.payload).await {
             sentry::capture_error(&err);
             eprintln!("failed to process command message on {}: {err}", message.subject);
+            continue;
         }
 
         message.ack().await.map_err(io::Error::other)?;
@@ -187,7 +203,7 @@ async fn handle_message(
         timeout_ms: payload.timeout_ms,
     };
 
-    let queue_len = command_queue.enqueue(queued_command.clone()).await;
+    let queue_len = command_queue.enqueue(queued_command.clone()).await?;
     println!(
         "Queued command {} for IMEI {}; timeout_ms: {:?}; payload: {:?}; queue depth: {}",
         queued_command.request_id,

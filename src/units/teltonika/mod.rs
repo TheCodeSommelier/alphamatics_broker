@@ -46,7 +46,7 @@ pub async fn teltonika_listen(
 
     loop {
         if ready_for_commands {
-            while let Some(command) = command_queue.peek(&imei).await {
+            while let Some(command) = command_queue.peek(&imei).await? {
                 if let Err(err) = execute_queued_command(
                     &mut socket,
                     &mut acc,
@@ -64,7 +64,7 @@ pub async fn teltonika_listen(
                     return Err(err);
                 }
 
-                command_queue.remove_front(&imei).await;
+                command_queue.remove_front(&imei).await?;
             }
         }
 
@@ -82,13 +82,15 @@ pub async fn teltonika_listen(
                     println!("Received {} bytes: {}", n, hex::encode(&buf[..n]));
                     acc.extend_from_slice(&buf[..n]);
 
-                    while let Some(frame) = try_extract_frame(&mut acc) {
-                        if handle_unsolicited_frame(&mut socket, jetstream, &imei, make, frame).await? {
-                            ready_for_commands = true;
-                        }
+                while let Some(frame) = try_extract_frame(&mut acc) {
+                    if handle_unsolicited_frame(&mut socket, jetstream, &imei, make, frame).await? {
+                        ready_for_commands = true;
                     }
                 }
-                _ = command_queue.wait_for_command(&imei) => {}
+            }
+                wait = command_queue.wait_for_command(&imei) => {
+                    wait?;
+                }
             }
         } else {
             let n = socket.read(&mut buf).await?;
