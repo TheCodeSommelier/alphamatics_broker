@@ -1,17 +1,15 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    io,
-    sync::Arc,
-    time::Duration,
-};
+use std::{io, sync::Arc, time::Duration};
 
 use async_nats::jetstream::{
     consumer::{self, AckPolicy},
     Context,
 };
 use futures_util::StreamExt;
+use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Notify;
+
+use crate::redis::{RedisConnection, redis_connect};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommandPayload {
@@ -21,7 +19,7 @@ pub struct CommandPayload {
     pub timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueuedCommand {
     pub imei: String,
     pub request_id: String,
@@ -38,43 +36,82 @@ pub struct CommandResponsePayload {
     pub ok: bool,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct CommandQueue {
-    inner: Arc<Mutex<HashMap<String, VecDeque<QueuedCommand>>>>,
+    redis: RedisConnection,
     notify: Arc<Notify>,
 }
 
 impl CommandQueue {
+    pub async fn connect() -> io::Result<Self> {
+        Ok(Self {
+            redis: redis_connect().await?,
+            notify: Arc::new(Notify::new()),
+        })
+    }
+
     pub async fn enqueue(&self, command: QueuedCommand) -> usize {
-        let mut queues = self.inner.lock().await;
-        let queue = queues.entry(command.imei.clone()).or_default();
-        queue.push_back(command);
-        let len = queue.len();
-        drop(queues);
+        let mut redis = self.redis.clone();
+        let payload_key = command_payload_key(&command.imei, &command.request_id);
+        let queue_key = command_queue_key(&command.imei);
+        let payload = serde_json::to_string(&command).expect("queued command to serialize");
+        let _: () = redis::pipe()
+            .atomic()
+            .cmd("SET")
+            .arg(&payload_key)
+            .arg(payload)
+            .ignore()
+            .cmd("RPUSH")
+            .arg(&queue_key)
+            .arg(&command.request_id)
+            .ignore()
+            .query_async(&mut redis)
+            .await
+            .expect("redis enqueue to succeed");
+        let len: usize = redis.llen(&queue_key).await.expect("redis llen to succeed");
         self.notify.notify_waiters();
         len
     }
 
     pub async fn peek(&self, imei: &str) -> Option<QueuedCommand> {
-        let queues = self.inner.lock().await;
-        queues.get(imei).and_then(|queue| queue.front().cloned())
+        let mut redis = self.redis.clone();
+        let queue_key = command_queue_key(imei);
+        let req_id: Option<String> = redis
+            .lindex(&queue_key, 0)
+            .await
+            .expect("redis lindex to succeed");
+        let req_id = req_id?;
+        let payload_key = command_payload_key(imei, &req_id);
+        let payload: Option<String> = redis.get(&payload_key).await.expect("redis get to succeed");
+        payload.and_then(|payload| serde_json::from_str(&payload).ok())
     }
 
     pub async fn remove_front(&self, imei: &str) -> Option<QueuedCommand> {
-        let mut queues = self.inner.lock().await;
-        let queue = queues.get_mut(imei)?;
-        let command = queue.pop_front();
-
-        if queue.is_empty() {
-            queues.remove(imei);
-        }
-
-        command
+        let command = self.peek(imei).await?;
+        let mut redis = self.redis.clone();
+        let queue_key = command_queue_key(imei);
+        let payload_key = command_payload_key(imei, &command.request_id);
+        let _: () = redis::pipe()
+            .atomic()
+            .cmd("LPOP")
+            .arg(&queue_key)
+            .ignore()
+            .cmd("DEL")
+            .arg(&payload_key)
+            .ignore()
+            .query_async(&mut redis)
+            .await
+            .expect("redis remove_front to succeed");
+        Some(command)
     }
 
     pub async fn has_pending(&self, imei: &str) -> bool {
-        let queues = self.inner.lock().await;
-        queues.get(imei).is_some_and(|queue| !queue.is_empty())
+        let mut redis = self.redis.clone();
+        let len: usize = redis
+            .llen(command_queue_key(imei))
+            .await
+            .expect("redis llen to succeed");
+        len > 0
     }
 
     pub async fn wait_for_command(&self, imei: &str) {
@@ -84,9 +121,17 @@ impl CommandQueue {
     }
 }
 
+fn command_payload_key(imei: &str, req_id: &str) -> String {
+    return format!("command.{imei}.{req_id}");
+}
+
+fn command_queue_key(imei: &str) -> String {
+    return format!("command.queue.{imei}");
+}
+
 pub async fn run_command_listener(jetstream: Context, command_queue: CommandQueue) -> io::Result<()> {
     let subject = command_subject();
-    let stream_name = dotenvy::var("NATS_STREAM").unwrap_or("TELEMATICS".to_string());
+    let stream_name = dotenvy::var("NATS_COMMAND_STREAM").unwrap_or("COMMANDS".to_string());
     let consumer_name =
         dotenvy::var("NATS_COMMAND_CONSUMER").unwrap_or("broker_commands".to_string());
     let stream = jetstream

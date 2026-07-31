@@ -45,7 +45,8 @@ pub async fn nats_publish_command_response(
     payload: &CommandResponsePayload,
 ) -> io::Result<()> {
     let subject_prefix =
-        dotenvy::var("NATS_COMMAND_RESPONSE_SUBJECT").unwrap_or("command.response.*".to_string());
+        dotenvy::var("NATS_COMMAND_RESPONSE_SUBJECT")
+            .unwrap_or("units.command_response.*".to_string());
     let subject = response_subject(&subject_prefix, &payload.imei)?;
 
     let payload = serde_json::to_vec(payload).map_err(io::Error::other)?;
@@ -63,47 +64,41 @@ pub async fn nats_publish_command_response(
 // ==============================
 
 async fn ensure_stream(js: &Context) -> io::Result<()> {
-    let stream_name = dotenvy::var("NATS_STREAM").unwrap_or("TELEMATICS".to_string());
+    let telematics_stream = dotenvy::var("NATS_STREAM").unwrap_or("TELEMATICS".to_string());
+    let command_stream = dotenvy::var("NATS_COMMAND_STREAM").unwrap_or("COMMANDS".to_string());
     let avl_subject = dotenvy::var("NATS_SUBJECT").expect("NATS_SUBJECT has to be defined.");
     let command_subject = command_subject();
     let command_response_subject =
-        dotenvy::var("NATS_COMMAND_RESPONSE_SUBJECT").unwrap_or("command.response.*".to_string());
-    let command_response_stream = dotenvy::var("NATS_COMMAND_RESPONSE_STREAM")
-        .unwrap_or_else(|_| stream_name.clone());
-
-    let mut primary_subjects = vec![avl_subject, command_subject];
-    if command_response_stream == stream_name {
-        primary_subjects.push(command_response_subject.clone());
-    }
+        dotenvy::var("NATS_COMMAND_RESPONSE_SUBJECT")
+            .unwrap_or("units.command_response.*".to_string());
 
     println!(
         "Ensuring stream {} with subjects {:?}",
-        stream_name, primary_subjects
+        telematics_stream,
+        vec![avl_subject.clone()]
     );
     js.create_or_update_stream(async_nats::jetstream::stream::Config {
-        name: stream_name.clone(),
-        subjects: primary_subjects,
+        name: telematics_stream,
+        subjects: vec![avl_subject],
         max_messages: 10_000_000,
         ..Default::default()
     })
     .await
     .map_err(io::Error::other)?;
 
-    if command_response_stream != stream_name {
-        println!(
-            "Ensuring stream {} with subjects {:?}",
-            command_response_stream,
-            vec![command_response_subject.clone()]
-        );
-        js.create_or_update_stream(async_nats::jetstream::stream::Config {
-            name: command_response_stream,
-            subjects: vec![command_response_subject],
-            max_messages: 10_000_000,
-            ..Default::default()
-        })
-        .await
-        .map_err(io::Error::other)?;
-    }
+    println!(
+        "Ensuring stream {} with subjects {:?}",
+        command_stream,
+        vec![command_subject.clone(), command_response_subject.clone()]
+    );
+    js.create_or_update_stream(async_nats::jetstream::stream::Config {
+        name: command_stream,
+        subjects: vec![command_subject, command_response_subject],
+        max_messages: 10_000_000,
+        ..Default::default()
+    })
+    .await
+    .map_err(io::Error::other)?;
 
     Ok(())
 }
@@ -131,14 +126,14 @@ mod tests {
 
     #[test]
     fn builds_response_subject_from_wildcard_template() {
-        let subject = response_subject("command.response.*", "123456789012345").unwrap();
+        let subject = response_subject("units.command_response.*", "123456789012345").unwrap();
 
-        assert_eq!(subject, "command.response.123456789012345");
+        assert_eq!(subject, "units.command_response.123456789012345");
     }
 
     #[test]
     fn rejects_response_subject_without_terminal_wildcard() {
-        let err = response_subject("command.response", "123456789012345").unwrap_err();
+        let err = response_subject("units.command_response", "123456789012345").unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
     }

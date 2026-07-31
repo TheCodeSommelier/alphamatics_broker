@@ -13,6 +13,7 @@ use crate::{
 mod commands;
 mod db;
 mod nats;
+mod redis;
 mod units;
 
 async fn process_socket(
@@ -49,7 +50,8 @@ async fn tokio_main() -> io::Result<()> {
     let pool = build_pool()?;
     println!("Connecting to NATS...");
     let jetstream = nats_connect().await?;
-    let command_queue = CommandQueue::default();
+    println!("Connecting to Redis...");
+    let command_queue = CommandQueue::connect().await?;
     let command_listener = run_command_listener(jetstream.clone(), command_queue.clone());
 
     tokio::spawn(async move {
