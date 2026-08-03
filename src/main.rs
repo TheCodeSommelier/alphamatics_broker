@@ -4,16 +4,24 @@ use std::io;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::{
+    commands::{CommandQueue, run_command_listener},
     db::{build_pool, get_unit_make},
     nats::nats_connect,
     units::teltonika::{teltonika_listen, utils::teltonika_read_imei},
 };
 
+mod commands;
 mod db;
 mod nats;
+mod redis;
 mod units;
 
-async fn process_socket(mut socket: TcpStream, pool: &Pool, jetstream: &Context) -> io::Result<()> {
+async fn process_socket(
+    mut socket: TcpStream,
+    pool: &Pool,
+    jetstream: &Context,
+    command_queue: CommandQueue,
+) -> io::Result<()> {
     let peer_addr = socket.peer_addr().ok();
     println!("Peer addr: {:?}", peer_addr);
 
@@ -31,7 +39,7 @@ async fn process_socket(mut socket: TcpStream, pool: &Pool, jetstream: &Context)
     };
 
     let accepted = true;
-    teltonika_listen(socket, accepted, imei, jetstream, make).await
+    teltonika_listen(socket, accepted, imei, jetstream, make, command_queue).await
 }
 
 async fn tokio_main() -> io::Result<()> {
@@ -42,15 +50,27 @@ async fn tokio_main() -> io::Result<()> {
     let pool = build_pool()?;
     println!("Connecting to NATS...");
     let jetstream = nats_connect().await?;
+    println!("Connecting to Redis...");
+    let command_queue = CommandQueue::connect()?;
+    let command_listener = run_command_listener(jetstream.clone(), command_queue.clone());
+
+    tokio::spawn(async move {
+        if let Err(err) = command_listener.await {
+            sentry::capture_error(&err);
+            eprintln!("command listener error: {err}");
+        }
+    });
+
     println!("Broker listening on {addr}");
 
     loop {
         let (socket, _) = listener.accept().await?;
         let pool = pool.clone();
         let jetstream = jetstream.clone();
+        let command_queue = command_queue.clone();
 
         tokio::spawn(async move {
-            if let Err(err) = process_socket(socket, &pool, &jetstream).await {
+            if let Err(err) = process_socket(socket, &pool, &jetstream, command_queue).await {
                 sentry::capture_error(&err);
                 eprintln!("socket error: {err}");
             }
