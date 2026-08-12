@@ -72,6 +72,7 @@ async fn ensure_stream(js: &Context) -> io::Result<()> {
         dotenvy::var("NATS_COMMAND_RESPONSE_SUBJECT")
             .unwrap_or("units.command_response.*".to_string());
 
+    #[cfg(debug_assertions)]
     println!(
         "Ensuring stream {} with subjects {:?}",
         telematics_stream,
@@ -86,6 +87,7 @@ async fn ensure_stream(js: &Context) -> io::Result<()> {
     .await
     .map_err(io::Error::other)?;
 
+    #[cfg(debug_assertions)]
     println!(
         "Ensuring stream {} with subjects {:?}",
         command_stream,

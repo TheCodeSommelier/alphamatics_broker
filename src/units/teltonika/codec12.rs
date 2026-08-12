@@ -23,6 +23,7 @@ pub fn build_command_frame(command: &str) -> Vec<u8> {
     let crc = crc16_ibm(&frame[8..]);
     frame.extend_from_slice(&(crc as u32).to_be_bytes());
 
+    #[cfg(debug_assertions)]
     println!("Sending bytes: {}", hex::encode(&frame));
 
     frame

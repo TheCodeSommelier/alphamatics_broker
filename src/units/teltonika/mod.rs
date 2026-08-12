@@ -14,7 +14,7 @@ use crate::{
         codec12::{build_command_frame, parse_response_frame},
         data_parser::teltonika_parse_frame,
         errors::TeltonikaFrameError,
-        utils::{teltonika_print, teltonika_write_frame_ack, teltonika_write_imei_handshake},
+        utils::{teltonika_write_frame_ack, teltonika_write_imei_handshake},
     },
 };
 
@@ -33,10 +33,13 @@ pub async fn teltonika_listen(
     make: UnitMake,
     command_queue: CommandQueue,
 ) -> io::Result<()> {
+    #[cfg(debug_assertions)]
     let peer_addr = socket.peer_addr().ok();
+
     teltonika_write_imei_handshake(&mut socket, accepted).await?;
 
     if !accepted {
+        #[cfg(debug_assertions)]
         println!("Rejected IMEI {imei}, closing connection.");
         return Ok(());
     }
@@ -47,7 +50,7 @@ pub async fn teltonika_listen(
     loop {
         if ready_for_commands {
             while let Some(command) = command_queue.peek(&imei).await? {
-                if let Err(err) = execute_queued_command(
+                if let Err(_err) = execute_queued_command(
                     &mut socket,
                     &mut acc,
                     jetstream,
@@ -57,11 +60,14 @@ pub async fn teltonika_listen(
                 )
                 .await
                 {
-                    sentry::capture_error(&err);
+                    #[cfg(debug_assertions)]
+                    let err = &_err;
+
+                    #[cfg(debug_assertions)]
                     eprintln!(
                         "command execution failed for {imei}: {err}; command remains queued"
                     );
-                    return Err(err);
+                    return Err(_err);
                 }
 
                 command_queue.remove_front(&imei).await?;
@@ -75,11 +81,11 @@ pub async fn teltonika_listen(
                     let n = read?;
 
                     if n == 0 {
+                        #[cfg(debug_assertions)]
                         println!("Client disconnected: {:?}", peer_addr);
                         return Ok(());
                     }
 
-                    println!("Received {} bytes: {}", n, hex::encode(&buf[..n]));
                     acc.extend_from_slice(&buf[..n]);
 
                 while let Some(frame) = try_extract_frame(&mut acc) {
@@ -96,11 +102,11 @@ pub async fn teltonika_listen(
             let n = socket.read(&mut buf).await?;
 
             if n == 0 {
+                #[cfg(debug_assertions)]
                 println!("Client disconnected: {:?}", peer_addr);
                 return Ok(());
             }
 
-            println!("Received {} bytes: {}", n, hex::encode(&buf[..n]));
             acc.extend_from_slice(&buf[..n]);
 
             while let Some(frame) = try_extract_frame(&mut acc) {
@@ -123,6 +129,8 @@ async fn execute_queued_command(
     let frame = build_command_frame(&command.command);
     socket.write_all(&frame).await?;
     socket.flush().await?;
+
+    #[cfg(debug_assertions)]
     println!(
         "Sent Codec12 command {} to IMEI {}: {:?}",
         command.request_id, imei, command.command
@@ -160,8 +168,9 @@ async fn wait_for_command_response(
                 IncomingFrame::CommandResponse => {
                     return parse_response_frame(&frame);
                 }
-                IncomingFrame::Unsupported(codec_id) => {
-                    eprintln!("ignoring unsupported Teltonika codec {codec_id:#x} while waiting for command response");
+                IncomingFrame::Unsupported(_codec_id) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!("ignoring unsupported Teltonika codec {_codec_id:#x} while waiting for command response");
                 }
             }
         }
@@ -175,7 +184,6 @@ async fn wait_for_command_response(
             ));
         }
 
-        println!("Received {} bytes: {}", n, hex::encode(&buf[..n]));
         acc.extend_from_slice(&buf[..n]);
     }
 }
@@ -193,12 +201,15 @@ async fn handle_unsolicited_frame(
             Ok(true)
         }
         IncomingFrame::CommandResponse => {
-            let response = parse_response_frame(&frame)?;
-            eprintln!("unsolicited Codec12 response from {imei}: {response}");
+            let _response = parse_response_frame(&frame)?;
+
+            #[cfg(debug_assertions)]
+            eprintln!("unsolicited Codec12 response from {imei}: {_response}");
             Ok(false)
         }
-        IncomingFrame::Unsupported(codec_id) => {
-            eprintln!("ignoring unsupported Teltonika codec {codec_id:#x} from {imei}");
+        IncomingFrame::Unsupported(_codec_id) => {
+            #[cfg(debug_assertions)]
+            eprintln!("ignoring unsupported Teltonika codec {_codec_id:#x} from {imei}");
             Ok(false)
         }
     }
@@ -215,13 +226,14 @@ async fn handle_avl_frame(
         Ok(data) => data,
         Err(err) => {
             if let Some(ack_record_count) = err.ack_record_count() {
+                #[cfg(debug_assertions)]
                 eprintln!("discarded frame: {err}");
                 teltonika_write_frame_ack(socket, ack_record_count).await?;
             } else {
                 match err {
-                    TeltonikaFrameError::Parse(err) => {
-                        sentry::capture_error(&err);
-                        eprintln!("parse error: {err}");
+                    TeltonikaFrameError::Parse(_err) => {
+                        #[cfg(debug_assertions)]
+                        eprintln!("parse error: {_err}");
                     }
                     TeltonikaFrameError::Discarded { .. } => unreachable!(),
                 }
@@ -231,7 +243,13 @@ async fn handle_avl_frame(
     };
 
     nats_publish(jetstream, &data, imei, make).await?;
-    teltonika_print(&data);
+
+    #[cfg(debug_assertions)]
+    println!(
+        "Frame ingested for IMEI {imei} ({} records)",
+        data.record_count
+    );
+
     teltonika_write_frame_ack(socket, data.record_count).await
 }
 

@@ -10,19 +10,7 @@ use tokio_postgres::{Config, Error as PgError};
 pub use self::types::UnitMake;
 
 fn pg_to_io(context: &'static str, e: PgError) -> io::Error {
-    eprintln!("{context}: {e:?}");
-
-    if let Some(db) = e.as_db_error() {
-        eprintln!("  pg code: {:?}", db.code());
-        eprintln!("  pg msg : {}", db.message());
-        if let Some(detail) = db.detail() {
-            eprintln!("  detail : {detail}");
-        }
-        if let Some(hint) = db.hint() {
-            eprintln!("  hint   : {hint}");
-        }
-    }
-    io::Error::new(io::ErrorKind::Other, e.to_string())
+    io::Error::other(format!("{context}: {e}"))
 }
 
 fn other<E: std::fmt::Display>(e: E) -> io::Error {

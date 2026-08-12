@@ -168,13 +168,17 @@ pub async fn run_command_listener(jetstream: Context, command_queue: CommandQueu
         .map_err(io::Error::other)?;
     let mut messages = consumer.messages().await.map_err(io::Error::other)?;
 
+    #[cfg(debug_assertions)]
     println!("Subscribed to JetStream command subject {subject} on consumer {consumer_name}");
 
     while let Some(message) = messages.next().await {
         let message = message.map_err(io::Error::other)?;
 
-        if let Err(err) = handle_message(&command_queue, message.subject.as_str(), &message.payload).await {
-            sentry::capture_error(&err);
+        if let Err(_err) = handle_message(&command_queue, message.subject.as_str(), &message.payload).await {
+            #[cfg(debug_assertions)]
+            let err = _err;
+
+            #[cfg(debug_assertions)]
             eprintln!("failed to process command message on {}: {err}", message.subject);
             continue;
         }
@@ -203,14 +207,16 @@ async fn handle_message(
         timeout_ms: payload.timeout_ms,
     };
 
-    let queue_len = command_queue.enqueue(queued_command.clone()).await?;
+    let _queue_len = command_queue.enqueue(queued_command.clone()).await?;
+
+    #[cfg(debug_assertions)]
     println!(
         "Queued command {} for IMEI {}; timeout_ms: {:?}; payload: {:?}; queue depth: {}",
         queued_command.request_id,
         queued_command.imei,
         queued_command.timeout_ms,
         queued_command.command,
-        queue_len
+        _queue_len
     );
 
     Ok(())
