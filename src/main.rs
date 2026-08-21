@@ -22,17 +22,25 @@ async fn process_socket(
     jetstream: &Context,
     command_queue: CommandQueue,
 ) -> io::Result<()> {
+    #[cfg(debug_assertions)]
     let peer_addr = socket.peer_addr().ok();
+
+    #[cfg(debug_assertions)]
     println!("Peer addr: {:?}", peer_addr);
 
     let imei = teltonika_read_imei(&mut socket).await?;
+
+    #[cfg(debug_assertions)]
     println!("IMEI: {imei}");
 
     let make = match get_unit_make(&pool, &imei).await {
         Ok(Some(make)) => make,
         Ok(None) => return Ok(()),
-        Err(err) => {
-            sentry::capture_error(&err);
+        Err(_err) => {
+            #[cfg(debug_assertions)]
+            let err = _err;
+
+            #[cfg(debug_assertions)]
             eprintln!("imei lookup error: {err}");
             return Ok(());
         }
@@ -44,23 +52,36 @@ async fn process_socket(
 
 async fn tokio_main() -> io::Result<()> {
     let addr = dotenvy::var("ADDR").unwrap_or("127.0.0.1:4001".to_string());
+
+    #[cfg(debug_assertions)]
     println!("Binding broker listener on {addr}...");
+
     let listener = TcpListener::bind(&addr).await?;
+
+    #[cfg(debug_assertions)]
     println!("Building database pool...");
+
     let pool = build_pool()?;
+
+    #[cfg(debug_assertions)]
     println!("Connecting to NATS...");
+
     let jetstream = nats_connect().await?;
+
+    #[cfg(debug_assertions)]
     println!("Connecting to Redis...");
+
     let command_queue = CommandQueue::connect()?;
     let command_listener = run_command_listener(jetstream.clone(), command_queue.clone());
 
     tokio::spawn(async move {
         if let Err(err) = command_listener.await {
             sentry::capture_error(&err);
-            eprintln!("command listener error: {err}");
+            eprintln!("CRITICAL: command listener stopped: {err}");
         }
     });
 
+    #[cfg(debug_assertions)]
     println!("Broker listening on {addr}");
 
     loop {
@@ -70,8 +91,11 @@ async fn tokio_main() -> io::Result<()> {
         let command_queue = command_queue.clone();
 
         tokio::spawn(async move {
-            if let Err(err) = process_socket(socket, &pool, &jetstream, command_queue).await {
-                sentry::capture_error(&err);
+            if let Err(_err) = process_socket(socket, &pool, &jetstream, command_queue).await {
+                #[cfg(debug_assertions)]
+                let err = _err;
+
+                #[cfg(debug_assertions)]
                 eprintln!("socket error: {err}");
             }
         });
@@ -89,7 +113,7 @@ fn main() -> io::Result<()> {
             environment: Some(environment.into()),
             release: sentry::release_name!(),
             send_default_pii: true,
-            traces_sample_rate: 0.1,
+            traces_sample_rate: 0.0,
             ..Default::default()
         },
     ));
@@ -101,7 +125,7 @@ fn main() -> io::Result<()> {
 
     if let Err(err) = runtime.block_on(tokio_main()) {
         sentry::capture_error(&err);
-        eprintln!("broker failed to start: {err}");
+        eprintln!("CRITICAL: broker stopped: {err}");
         return Err(err);
     }
 

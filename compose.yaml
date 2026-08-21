@@ -14,6 +14,12 @@ services:
       - "-js"
       - "-sd"
       - "/data"
+    volumes:
+      - type: bind
+        source: "${NATS_DATA_DIR:?NATS_DATA_DIR must point to the mounted EBS data directory}"
+        target: /data
+        bind:
+          create_host_path: false
     ports:
       - "4222:4222"
       - "8222:8222"
@@ -26,6 +32,10 @@ services:
       target: final
     env_file:
       - .env
+    environment:
+      NATS_MAX_AGE_HOURS: "${NATS_MAX_AGE_HOURS:-72}"
+      NATS_TELEMATICS_MAX_BYTES: "${NATS_TELEMATICS_MAX_BYTES:?NATS_TELEMATICS_MAX_BYTES must be set}"
+      NATS_COMMANDS_MAX_BYTES: "${NATS_COMMANDS_MAX_BYTES:?NATS_COMMANDS_MAX_BYTES must be set}"
     ports:
       - 4001:4001
     depends_on:
@@ -64,4 +74,3 @@ services:
 # secrets:
 #   db-password:
 #     file: db/password.txt
-
