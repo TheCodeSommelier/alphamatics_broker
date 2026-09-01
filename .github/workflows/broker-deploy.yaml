@@ -39,6 +39,16 @@ jobs:
             docker push ${{ steps.ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest
           fi
 
+      - name: Upload Compose configuration
+        uses: appleboy/scp-action@v1.0.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: compose.yaml
+          target: /tmp/alphamatics-broker-deploy
+          overwrite: true
+
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.2.0
         with:
@@ -46,23 +56,15 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            NATS_DATA_DIR="${{ vars.NATS_DATA_DIR }}"
-            if [ -z "$NATS_DATA_DIR" ]; then
-              echo "NATS_DATA_DIR GitHub Environment variable is required"
-              exit 1
-            fi
-
-            if ! mountpoint -q "$NATS_DATA_DIR"; then
-              echo "$NATS_DATA_DIR is not a mounted filesystem; refusing to start NATS"
-              exit 1
-            fi
+            sudo install -m 0644 \
+              /tmp/alphamatics-broker-deploy/compose.yaml \
+              /opt/broker/compose.yaml
 
             aws ecr get-login-password --region ${{ secrets.AWS_REGION }} \
               | docker login --username AWS --password-stdin ${{ steps.ecr.outputs.registry }}
 
             {
               echo "BROKER_IMAGE=${{ steps.ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ github.ref_name }}"
-              echo "NATS_DATA_DIR=$NATS_DATA_DIR"
               echo "NATS_MAX_AGE_HOURS=${{ vars.NATS_MAX_AGE_HOURS || '72' }}"
               echo "NATS_TELEMATICS_MAX_BYTES=${{ vars.NATS_TELEMATICS_MAX_BYTES }}"
               echo "NATS_COMMANDS_MAX_BYTES=${{ vars.NATS_COMMANDS_MAX_BYTES }}"
