@@ -41,7 +41,10 @@ impl RfidEnrollmentPublisher {
     }
 
     pub async fn publish_scan(&self, frame: &TeltonikaFrame) -> io::Result<bool> {
-        if !frame.records.iter().any(is_rfid_record) {
+        if !frame.records.iter().any(|record| {
+            record.io_element.event_io_id == RFID_AVL_ID
+                && record.io_element.eight_bytes.contains_key(&RFID_AVL_ID)
+        }) {
             return Ok(false);
         }
 
