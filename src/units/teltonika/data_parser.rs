@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, io, u8};
+use std::{collections::BTreeMap, io};
 
 use crate::units::{
     teltonika::errors::{DiscardReason, TeltonikaFrameError},

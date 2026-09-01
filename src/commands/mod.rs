@@ -139,11 +139,11 @@ impl CommandQueue {
 }
 
 fn command_payload_key(imei: &str, req_id: &str) -> String {
-    return format!("command.{imei}.{req_id}");
+    format!("command.{imei}.{req_id}")
 }
 
 fn command_queue_key(imei: &str) -> String {
-    return format!("command.queue.{imei}");
+    format!("command.queue.{imei}")
 }
 
 pub async fn run_command_listener(jetstream: Context, command_queue: CommandQueue) -> io::Result<()> {

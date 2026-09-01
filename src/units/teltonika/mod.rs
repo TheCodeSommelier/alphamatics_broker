@@ -10,6 +10,7 @@ use crate::{
     commands::{CommandQueue, CommandResponsePayload, QueuedCommand},
     db::UnitMake,
     nats::{nats_publish, nats_publish_command_response},
+    rfid::RfidEnrollmentPublisher,
     units::teltonika::{
         codec12::{build_command_frame, parse_response_frame},
         data_parser::teltonika_parse_frame,
@@ -32,6 +33,7 @@ pub async fn teltonika_listen(
     jetstream: &Context,
     make: UnitMake,
     command_queue: CommandQueue,
+    rfid_publisher: RfidEnrollmentPublisher,
 ) -> io::Result<()> {
     #[cfg(debug_assertions)]
     let peer_addr = socket.peer_addr().ok();
@@ -57,6 +59,7 @@ pub async fn teltonika_listen(
                     &imei,
                     make,
                     &command,
+                    &rfid_publisher,
                 )
                 .await
                 {
@@ -89,7 +92,16 @@ pub async fn teltonika_listen(
                     acc.extend_from_slice(&buf[..n]);
 
                 while let Some(frame) = try_extract_frame(&mut acc) {
-                    if handle_unsolicited_frame(&mut socket, jetstream, &imei, make, frame).await? {
+                    if handle_unsolicited_frame(
+                        &mut socket,
+                        jetstream,
+                        &imei,
+                        make,
+                        &rfid_publisher,
+                        frame,
+                    )
+                    .await?
+                    {
                         ready_for_commands = true;
                     }
                 }
@@ -110,7 +122,16 @@ pub async fn teltonika_listen(
             acc.extend_from_slice(&buf[..n]);
 
             while let Some(frame) = try_extract_frame(&mut acc) {
-                if handle_unsolicited_frame(&mut socket, jetstream, &imei, make, frame).await? {
+                if handle_unsolicited_frame(
+                    &mut socket,
+                    jetstream,
+                    &imei,
+                    make,
+                    &rfid_publisher,
+                    frame,
+                )
+                .await?
+                {
                     ready_for_commands = true;
                 }
             }
@@ -125,6 +146,7 @@ async fn execute_queued_command(
     imei: &str,
     make: UnitMake,
     command: &QueuedCommand,
+    rfid_publisher: &RfidEnrollmentPublisher,
 ) -> io::Result<()> {
     let frame = build_command_frame(&command.command);
     socket.write_all(&frame).await?;
@@ -139,7 +161,7 @@ async fn execute_queued_command(
     let response_timeout = Duration::from_millis(command.timeout_ms.unwrap_or(30_000));
     let response = timeout(
         response_timeout,
-        wait_for_command_response(socket, acc, jetstream, imei, make),
+        wait_for_command_response(socket, acc, jetstream, imei, make, rfid_publisher),
     )
     .await
     .map_err(|_| {
@@ -158,12 +180,13 @@ async fn wait_for_command_response(
     jetstream: &Context,
     imei: &str,
     make: UnitMake,
+    rfid_publisher: &RfidEnrollmentPublisher,
 ) -> io::Result<String> {
     loop {
         while let Some(frame) = try_extract_frame(acc) {
             match classify_frame(&frame)? {
                 IncomingFrame::Avl => {
-                    handle_avl_frame(socket, jetstream, imei, make, frame).await?;
+                    handle_avl_frame(socket, jetstream, imei, make, rfid_publisher, frame).await?;
                 }
                 IncomingFrame::CommandResponse => {
                     return parse_response_frame(&frame);
@@ -193,11 +216,12 @@ async fn handle_unsolicited_frame(
     jetstream: &Context,
     imei: &str,
     make: UnitMake,
+    rfid_publisher: &RfidEnrollmentPublisher,
     frame: Vec<u8>,
 ) -> io::Result<bool> {
     match classify_frame(&frame)? {
         IncomingFrame::Avl => {
-            handle_avl_frame(socket, jetstream, imei, make, frame).await?;
+            handle_avl_frame(socket, jetstream, imei, make, rfid_publisher, frame).await?;
             Ok(true)
         }
         IncomingFrame::CommandResponse => {
@@ -220,6 +244,7 @@ async fn handle_avl_frame(
     jetstream: &Context,
     imei: &str,
     make: UnitMake,
+    rfid_publisher: &RfidEnrollmentPublisher,
     frame: Vec<u8>,
 ) -> io::Result<()> {
     let data = match teltonika_parse_frame(&frame, imei) {
@@ -243,6 +268,11 @@ async fn handle_avl_frame(
     };
 
     nats_publish(jetstream, &data, imei, make).await?;
+
+    if let Err(err) = rfid_publisher.publish_scan(&data).await {
+        sentry::capture_error(&err);
+        eprintln!("failed to publish RFID scan for {imei}: {err}");
+    }
 
     #[cfg(debug_assertions)]
     println!(
@@ -274,33 +304,31 @@ async fn publish_command_result(
 }
 
 fn try_extract_frame(acc: &mut Vec<u8>) -> Option<Vec<u8>> {
-    loop {
-        if acc.len() < 8 {
-            return None;
-        }
-
-        if acc[0..4] != [0, 0, 0, 0] {
-            if let Some(pos) = acc.windows(4).position(|w| w == [0, 0, 0, 0]) {
-                acc.drain(..pos);
-            } else {
-                acc.clear();
-                return None;
-            }
-        }
-
-        if acc.len() < 8 {
-            return None;
-        }
-
-        let data_len = u32::from_be_bytes(acc[4..8].try_into().unwrap()) as usize;
-        let frame_len = 8 + data_len + 4;
-
-        if acc.len() < frame_len {
-            return None;
-        }
-
-        return Some(acc.drain(..frame_len).collect());
+    if acc.len() < 8 {
+        return None;
     }
+
+    if acc[0..4] != [0, 0, 0, 0] {
+        if let Some(pos) = acc.windows(4).position(|w| w == [0, 0, 0, 0]) {
+            acc.drain(..pos);
+        } else {
+            acc.clear();
+            return None;
+        }
+    }
+
+    if acc.len() < 8 {
+        return None;
+    }
+
+    let data_len = u32::from_be_bytes(acc[4..8].try_into().unwrap()) as usize;
+    let frame_len = 8 + data_len + 4;
+
+    if acc.len() < frame_len {
+        return None;
+    }
+
+    Some(acc.drain(..frame_len).collect())
 }
 
 fn classify_frame(frame: &[u8]) -> io::Result<IncomingFrame> {
