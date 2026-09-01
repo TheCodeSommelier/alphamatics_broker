@@ -28,7 +28,7 @@ pub async fn nats_publish(
     imei: &str,
     make: UnitMake,
 ) -> io::Result<()> {
-    let subject = format!("units.avl.{:?}.{imei}", make);
+    let subject = format!("units.avl.{}.{imei}", make.as_subject_segment());
 
     let payload = serde_json::to_vec(data).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 

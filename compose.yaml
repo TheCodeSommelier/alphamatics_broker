@@ -15,16 +15,13 @@ services:
       - "-sd"
       - "/data"
     volumes:
-      - type: bind
-        source: "${NATS_DATA_DIR:?NATS_DATA_DIR must point to the mounted EBS data directory}"
-        target: /data
-        bind:
-          create_host_path: false
+      - nats-data:/data
     ports:
       - "4222:4222"
       - "8222:8222"
     restart: unless-stopped
   broker:
+    image: "${BROKER_IMAGE:-broker:local}"
     build:
       context: .
       args:
@@ -41,6 +38,12 @@ services:
     depends_on:
       - nats
     restart: unless-stopped
+
+volumes:
+  nats-data:
+    # Stable across Compose project-name or checkout changes. Docker stores
+    # this volume in its data root on the host filesystem.
+    name: alphamatics-broker-nats-data
 
 # The commented out section below is an example of how to define a PostgreSQL
 # database that your application can use. `depends_on` tells Docker Compose to

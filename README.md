@@ -2,15 +2,15 @@
 
 ## JetStream persistence and retention
 
-The NATS container stores JetStream data at `/data`. Docker Compose requires
-`NATS_DATA_DIR` to point to an existing host directory mounted from the encrypted
-EBS data volume; it deliberately does not create the directory or fall back to
-the EC2 root disk.
+The NATS container stores JetStream data at `/data`, backed by the stable Docker
+named volume `alphamatics-broker-nats-data`. Docker keeps the volume in its data
+root on the host filesystem, so on a normal EBS-backed EC2 instance the data
+lives on the instance's root EBS volume. No separately mounted EBS data volume
+or `NATS_DATA_DIR` setting is required.
 
 Configure Compose and the broker with:
 
 ```dotenv
-NATS_DATA_DIR=/mnt/nats
 NATS_MAX_AGE_HOURS=72
 NATS_TELEMATICS_MAX_BYTES=<required byte limit>
 NATS_COMMANDS_MAX_BYTES=<required byte limit>
@@ -22,15 +22,37 @@ room for JetStream storage overhead and the 50/70/85% disk alarms. The broker
 creates or updates both streams with file storage and enforces the age, byte,
 and existing 10,000,000-message limits; whichever limit is reached first wins.
 
-The host must mount the EBS volume and create `NATS_DATA_DIR` with permissions
-that allow the NATS container to write before running `docker compose up`.
-The deployment workflow also refuses to start NATS unless `NATS_DATA_DIR` is a
-real mount point, preventing an unmounted EBS volume from silently falling back
-to the EC2 root disk.
+The named volume survives container recreation and normal deployments. Do not
+run `docker compose down --volumes` or remove/prune this volume unless deleting
+the JetStream data is intentional.
 
-Set `NATS_DATA_DIR`, `NATS_TELEMATICS_MAX_BYTES`, and
-`NATS_COMMANDS_MAX_BYTES` as GitHub Environment variables for both staging and
-production. `NATS_MAX_AGE_HOURS` is optional and defaults to 72.
+Set `NATS_TELEMATICS_MAX_BYTES` and `NATS_COMMANDS_MAX_BYTES` as GitHub
+Environment variables for both staging and production. `NATS_MAX_AGE_HOURS` is
+optional and defaults to 72.
+
+This protects data from container replacement, not EC2 termination. AWS deletes
+a root EBS volume on instance termination by default. For data that must survive
+instance replacement, disable `DeleteOnTermination` for the root volume and/or
+take tested EBS snapshots.
+
+### Migrating from the old bind mount
+
+The first deployment with the named volume starts with an empty volume. The old
+bind-mounted directory is not deleted. To retain its JetStream contents, stop
+NATS and copy the directory once before deploying this Compose configuration:
+
+```sh
+docker compose stop nats
+docker volume create alphamatics-broker-nats-data
+docker run --rm \
+  --mount type=bind,src=/previous/nats/data,dst=/from,readonly \
+  --mount type=volume,src=alphamatics-broker-nats-data,dst=/to \
+  alpine sh -c 'cp -a /from/. /to/'
+```
+
+Replace `/previous/nats/data` with the previous `NATS_DATA_DIR`, then run the
+normal deployment. Verify the old directory and the new stream state before
+removing any old storage.
 
 ## Git commits
 

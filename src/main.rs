@@ -7,6 +7,7 @@ use crate::{
     commands::{CommandQueue, run_command_listener},
     db::{build_pool, get_unit_make},
     nats::nats_connect,
+    rfid::RfidEnrollmentPublisher,
     units::teltonika::{teltonika_listen, utils::teltonika_read_imei},
 };
 
@@ -14,6 +15,7 @@ mod commands;
 mod db;
 mod nats;
 mod redis;
+mod rfid;
 mod units;
 
 async fn process_socket(
@@ -21,6 +23,7 @@ async fn process_socket(
     pool: &Pool,
     jetstream: &Context,
     command_queue: CommandQueue,
+    rfid_publisher: RfidEnrollmentPublisher,
 ) -> io::Result<()> {
     #[cfg(debug_assertions)]
     let peer_addr = socket.peer_addr().ok();
@@ -33,7 +36,7 @@ async fn process_socket(
     #[cfg(debug_assertions)]
     println!("IMEI: {imei}");
 
-    let make = match get_unit_make(&pool, &imei).await {
+    let make = match get_unit_make(pool, &imei).await {
         Ok(Some(make)) => make,
         Ok(None) => return Ok(()),
         Err(_err) => {
@@ -47,7 +50,16 @@ async fn process_socket(
     };
 
     let accepted = true;
-    teltonika_listen(socket, accepted, imei, jetstream, make, command_queue).await
+    teltonika_listen(
+        socket,
+        accepted,
+        imei,
+        jetstream,
+        make,
+        command_queue,
+        rfid_publisher,
+    )
+    .await
 }
 
 async fn tokio_main() -> io::Result<()> {
@@ -72,6 +84,7 @@ async fn tokio_main() -> io::Result<()> {
     println!("Connecting to Redis...");
 
     let command_queue = CommandQueue::connect()?;
+    let rfid_publisher = RfidEnrollmentPublisher::connect(jetstream.client())?;
     let command_listener = run_command_listener(jetstream.clone(), command_queue.clone());
 
     tokio::spawn(async move {
@@ -89,9 +102,18 @@ async fn tokio_main() -> io::Result<()> {
         let pool = pool.clone();
         let jetstream = jetstream.clone();
         let command_queue = command_queue.clone();
+        let rfid_publisher = rfid_publisher.clone();
 
         tokio::spawn(async move {
-            if let Err(_err) = process_socket(socket, &pool, &jetstream, command_queue).await {
+            if let Err(_err) = process_socket(
+                socket,
+                &pool,
+                &jetstream,
+                command_queue,
+                rfid_publisher,
+            )
+            .await
+            {
                 #[cfg(debug_assertions)]
                 let err = _err;
 
