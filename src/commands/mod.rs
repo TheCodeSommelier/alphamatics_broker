@@ -1,17 +1,18 @@
 use std::{
     io,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_nats::jetstream::{
+    AckKind, Context,
     consumer::{self, AckPolicy},
-    Context,
 };
 use futures_util::StreamExt;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
+use tokio::{sync::Notify, time::sleep};
+use tracing::{error, info, warn};
 
 use crate::redis::{RedisClient, redis_connect};
 
@@ -19,6 +20,12 @@ use crate::redis::{RedisClient, redis_connect};
 /// disconnected mid-command) before it is failed with `max_attempts`.
 pub const MAX_COMMAND_ATTEMPTS: u32 = 3;
 const DEFAULT_COMMAND_TTL_SECS: u64 = 24 * 60 * 60;
+
+const LISTENER_MIN_BACKOFF: Duration = Duration::from_secs(1);
+const LISTENER_MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// A listener that ran this long before failing is considered to have been
+/// healthy, so the next restart starts from the minimum backoff again.
+const LISTENER_HEALTHY_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommandPayload {
@@ -239,7 +246,33 @@ fn command_queue_key(imei: &str) -> String {
     format!("command.queue.{imei}")
 }
 
-pub async fn run_command_listener(jetstream: Context, command_queue: CommandQueue) -> io::Result<()> {
+/// Keeps the command listener running for the life of the process. Without
+/// this, a NATS hiccup would silently stop command delivery while telemetry
+/// kept flowing.
+pub async fn supervise_command_listener(jetstream: Context, command_queue: CommandQueue) {
+    let mut backoff = LISTENER_MIN_BACKOFF;
+
+    loop {
+        let started = Instant::now();
+        let result = run_command_listener(jetstream.clone(), command_queue.clone()).await;
+
+        if started.elapsed() >= LISTENER_HEALTHY_AFTER {
+            backoff = LISTENER_MIN_BACKOFF;
+        }
+
+        match result {
+            Ok(()) => warn!(retry_in = ?backoff, "command listener exited, restarting"),
+            Err(err) => {
+                error!(error = %err, retry_in = ?backoff, "command listener failed, restarting")
+            }
+        }
+
+        sleep(backoff).await;
+        backoff = (backoff * 2).min(LISTENER_MAX_BACKOFF);
+    }
+}
+
+async fn run_command_listener(jetstream: Context, command_queue: CommandQueue) -> io::Result<()> {
     let subject = command_subject();
     let stream_name = dotenvy::var("NATS_COMMAND_STREAM").unwrap_or("COMMANDS".to_string());
     let consumer_name =
@@ -261,22 +294,26 @@ pub async fn run_command_listener(jetstream: Context, command_queue: CommandQueu
         .map_err(io::Error::other)?;
     let mut messages = consumer.messages().await.map_err(io::Error::other)?;
 
-    #[cfg(debug_assertions)]
-    println!("Subscribed to JetStream command subject {subject} on consumer {consumer_name}");
+    info!(%subject, consumer = %consumer_name, "command listener subscribed");
 
     while let Some(message) = messages.next().await {
         let message = message.map_err(io::Error::other)?;
 
-        if let Err(_err) = handle_message(&command_queue, message.subject.as_str(), &message.payload).await {
-            #[cfg(debug_assertions)]
-            let err = _err;
-
-            #[cfg(debug_assertions)]
-            eprintln!("failed to process command message on {}: {err}", message.subject);
-            continue;
+        match handle_message(&command_queue, message.subject.as_str(), &message.payload).await {
+            Ok(()) => message.ack().await.map_err(io::Error::other)?,
+            // A malformed message will never succeed, so don't redeliver it.
+            Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
+                error!(subject = %message.subject, error = %err, "rejecting invalid command message");
+                message
+                    .ack_with(AckKind::Term)
+                    .await
+                    .map_err(io::Error::other)?;
+            }
+            // Left unacked: JetStream redelivers after ack_wait, up to max_deliver.
+            Err(err) => {
+                warn!(subject = %message.subject, error = %err, "failed to queue command, will be redelivered")
+            }
         }
-
-        message.ack().await.map_err(io::Error::other)?;
     }
 
     Err(io::Error::new(
@@ -291,7 +328,8 @@ async fn handle_message(
     payload: &[u8],
 ) -> io::Result<()> {
     let imei = parse_subject(subject)?;
-    let payload: CommandPayload = serde_json::from_slice(payload).map_err(io::Error::other)?;
+    let payload: CommandPayload = serde_json::from_slice(payload)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
 
     let expires_at_ms = payload
         .expires_at_ms
@@ -306,16 +344,14 @@ async fn handle_message(
         attempts: 0,
     };
 
-    let _queue_len = command_queue.enqueue(queued_command.clone()).await?;
+    let queue_len = command_queue.enqueue(queued_command.clone()).await?;
 
-    #[cfg(debug_assertions)]
-    println!(
-        "Queued command {} for IMEI {}; timeout_ms: {:?}; payload: {:?}; queue depth: {}",
-        queued_command.request_id,
-        queued_command.imei,
-        queued_command.timeout_ms,
-        queued_command.command,
-        _queue_len
+    info!(
+        request_id = %queued_command.request_id,
+        imei = %queued_command.imei,
+        command = %queued_command.command,
+        queue_len,
+        "command queued"
     );
 
     Ok(())

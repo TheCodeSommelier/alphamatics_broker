@@ -5,6 +5,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     time::{Duration, timeout},
 };
+use tracing::{debug, error, info, warn};
 
 use crate::{
     commands::{
@@ -37,14 +38,10 @@ pub async fn teltonika_listen(
     command_queue: CommandQueue,
     rfid_publisher: RfidEnrollmentPublisher,
 ) -> io::Result<()> {
-    #[cfg(debug_assertions)]
-    let peer_addr = socket.peer_addr().ok();
-
     teltonika_write_imei_handshake(&mut socket, accepted).await?;
 
     if !accepted {
-        #[cfg(debug_assertions)]
-        println!("Rejected IMEI {imei}, closing connection.");
+        debug!("rejected IMEI, closing connection");
         return Ok(());
     }
 
@@ -100,16 +97,14 @@ pub async fn teltonika_listen(
                             format!("timed out waiting for response to {}", command.request_id),
                         ));
                     }
-                    Err(_err) => {
-                        #[cfg(debug_assertions)]
-                        let err = &_err;
-
-                        #[cfg(debug_assertions)]
-                        eprintln!(
-                            "command execution failed for {imei}: {err}; command remains queued (attempt {})",
-                            command.attempts
+                    Err(err) => {
+                        warn!(
+                            request_id = %command.request_id,
+                            attempt = command.attempts,
+                            error = %err,
+                            "command interrupted, left queued for retry"
                         );
-                        return Err(_err);
+                        return Err(err);
                     }
                 }
             }
@@ -122,8 +117,7 @@ pub async fn teltonika_listen(
                     let n = read?;
 
                     if n == 0 {
-                        #[cfg(debug_assertions)]
-                        println!("Client disconnected: {:?}", peer_addr);
+                        debug!("device disconnected");
                         return Ok(());
                     }
 
@@ -152,8 +146,7 @@ pub async fn teltonika_listen(
             let n = socket.read(&mut buf).await?;
 
             if n == 0 {
-                #[cfg(debug_assertions)]
-                println!("Client disconnected: {:?}", peer_addr);
+                debug!("device disconnected");
                 return Ok(());
             }
 
@@ -190,10 +183,11 @@ async fn execute_queued_command(
     socket.write_all(&frame).await?;
     socket.flush().await?;
 
-    #[cfg(debug_assertions)]
-    println!(
-        "Sent Codec12 command {} to IMEI {}: {:?}",
-        command.request_id, imei, command.command
+    info!(
+        request_id = %command.request_id,
+        command = %command.command,
+        attempt = command.attempts,
+        "sent command"
     );
 
     // Ok(None) means the device didn't answer in time.
@@ -215,11 +209,7 @@ async fn fail_command(
     command: &QueuedCommand,
     error: CommandError,
 ) -> io::Result<()> {
-    #[cfg(debug_assertions)]
-    eprintln!(
-        "failing command {} for {}: {error:?}",
-        command.request_id, command.imei
-    );
+    warn!(request_id = %command.request_id, ?error, "command failed");
 
     nats_publish_command_response(jetstream, &CommandResponsePayload::failure(command, error))
         .await?;
@@ -244,9 +234,8 @@ async fn wait_for_command_response(
                 IncomingFrame::CommandResponse => {
                     return parse_response_frame(&frame);
                 }
-                IncomingFrame::Unsupported(_codec_id) => {
-                    #[cfg(debug_assertions)]
-                    eprintln!("ignoring unsupported Teltonika codec {_codec_id:#x} while waiting for command response");
+                IncomingFrame::Unsupported(codec_id) => {
+                    warn!(codec_id = format!("{codec_id:#x}"), "ignoring unsupported codec");
                 }
             }
         }
@@ -278,15 +267,12 @@ async fn handle_unsolicited_frame(
             Ok(true)
         }
         IncomingFrame::CommandResponse => {
-            let _response = parse_response_frame(&frame)?;
-
-            #[cfg(debug_assertions)]
-            eprintln!("unsolicited Codec12 response from {imei}: {_response}");
+            let response = parse_response_frame(&frame)?;
+            debug!(%response, "ignoring unsolicited Codec12 response");
             Ok(false)
         }
-        IncomingFrame::Unsupported(_codec_id) => {
-            #[cfg(debug_assertions)]
-            eprintln!("ignoring unsupported Teltonika codec {_codec_id:#x} from {imei}");
+        IncomingFrame::Unsupported(codec_id) => {
+            warn!(codec_id = format!("{codec_id:#x}"), "ignoring unsupported codec");
             Ok(false)
         }
     }
@@ -304,14 +290,13 @@ async fn handle_avl_frame(
         Ok(data) => data,
         Err(err) => {
             if let Some(ack_record_count) = err.ack_record_count() {
-                #[cfg(debug_assertions)]
-                eprintln!("discarded frame: {err}");
+                warn!(error = %err, "discarded frame");
                 teltonika_write_frame_ack(socket, ack_record_count).await?;
             } else {
                 match err {
-                    TeltonikaFrameError::Parse(_err) => {
-                        #[cfg(debug_assertions)]
-                        eprintln!("parse error: {_err}");
+                    // Not acked, so the device will keep resending this frame.
+                    TeltonikaFrameError::Parse(err) => {
+                        error!(error = %err, frame = %hex::encode(&frame), "failed to parse AVL frame");
                     }
                     TeltonikaFrameError::Discarded { .. } => unreachable!(),
                 }
@@ -323,15 +308,10 @@ async fn handle_avl_frame(
     nats_publish(jetstream, &data, imei, make).await?;
 
     if let Err(err) = rfid_publisher.publish_scan(&data).await {
-        sentry::capture_error(&err);
-        eprintln!("failed to publish RFID scan for {imei}: {err}");
+        error!(error = %err, "failed to publish RFID scan");
     }
 
-    #[cfg(debug_assertions)]
-    println!(
-        "Frame ingested for IMEI {imei} ({} records)",
-        data.record_count
-    );
+    debug!(records = data.record_count, "frame ingested");
 
     teltonika_write_frame_ack(socket, data.record_count).await
 }
@@ -384,7 +364,11 @@ fn try_extract_frame(acc: &mut Vec<u8>) -> io::Result<Option<Vec<u8>>> {
             return Ok(Some(frame));
         }
 
-        eprintln!("dropping frame with crc mismatch: expected {expected_crc:#x}, got {actual_crc:#x}");
+        warn!(
+            expected = format!("{expected_crc:#x}"),
+            actual = format!("{actual_crc:#x}"),
+            "dropping frame with CRC mismatch"
+        );
     }
 }
 

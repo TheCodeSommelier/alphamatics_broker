@@ -80,12 +80,7 @@ async fn ensure_stream(js: &Context) -> io::Result<()> {
         dotenvy::var("NATS_COMMAND_RESPONSE_SUBJECT")
             .unwrap_or("units.command_response.*".to_string());
 
-    #[cfg(debug_assertions)]
-    println!(
-        "Ensuring stream {} with subjects {:?}",
-        telematics_stream,
-        vec![avl_subject.clone()]
-    );
+    tracing::info!(stream = %telematics_stream, subject = %avl_subject, "ensuring stream");
     js.create_or_update_stream(async_nats::jetstream::stream::Config {
         name: telematics_stream,
         subjects: vec![avl_subject],
@@ -98,11 +93,10 @@ async fn ensure_stream(js: &Context) -> io::Result<()> {
     .await
     .map_err(io::Error::other)?;
 
-    #[cfg(debug_assertions)]
-    println!(
-        "Ensuring stream {} with subjects {:?}",
-        command_stream,
-        vec![command_subject.clone(), command_response_subject.clone()]
+    tracing::info!(
+        stream = %command_stream,
+        subjects = ?[&command_subject, &command_response_subject],
+        "ensuring stream"
     );
     js.create_or_update_stream(async_nats::jetstream::stream::Config {
         name: command_stream,
