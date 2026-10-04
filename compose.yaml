@@ -29,10 +29,6 @@ services:
       target: final
     env_file:
       - .env
-    environment:
-      NATS_MAX_AGE_HOURS: "${NATS_MAX_AGE_HOURS:-72}"
-      NATS_TELEMATICS_MAX_BYTES: "${NATS_TELEMATICS_MAX_BYTES:?NATS_TELEMATICS_MAX_BYTES must be set}"
-      NATS_COMMANDS_MAX_BYTES: "${NATS_COMMANDS_MAX_BYTES:?NATS_COMMANDS_MAX_BYTES must be set}"
     ports:
       - 4001:4001
     depends_on:
