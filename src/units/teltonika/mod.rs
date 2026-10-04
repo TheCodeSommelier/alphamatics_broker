@@ -7,7 +7,9 @@ use tokio::{
 };
 
 use crate::{
-    commands::{CommandQueue, CommandResponsePayload, QueuedCommand},
+    commands::{
+        CommandError, CommandQueue, CommandResponsePayload, MAX_COMMAND_ATTEMPTS, QueuedCommand,
+    },
     db::UnitMake,
     nats::{nats_publish, nats_publish_command_response},
     rfid::RfidEnrollmentPublisher,
@@ -51,8 +53,24 @@ pub async fn teltonika_listen(
 
     loop {
         if ready_for_commands {
-            while let Some(command) = command_queue.peek(&imei).await? {
-                if let Err(_err) = execute_queued_command(
+            while let Some(mut command) = command_queue.peek(&imei).await? {
+                let rejection = if command.is_expired() {
+                    Some(CommandError::Expired)
+                } else if command.attempts >= MAX_COMMAND_ATTEMPTS {
+                    Some(CommandError::MaxAttempts)
+                } else {
+                    None
+                };
+
+                if let Some(error) = rejection {
+                    fail_command(jetstream, &command_queue, &command, error).await?;
+                    continue;
+                }
+
+                command.attempts += 1;
+                command_queue.record_attempt(&command).await?;
+
+                match execute_queued_command(
                     &mut socket,
                     &mut acc,
                     jetstream,
@@ -63,17 +81,37 @@ pub async fn teltonika_listen(
                 )
                 .await
                 {
-                    #[cfg(debug_assertions)]
-                    let err = &_err;
+                    Ok(Some(response)) => {
+                        nats_publish_command_response(
+                            jetstream,
+                            &CommandResponsePayload::success(&command, response),
+                        )
+                        .await?;
+                        command_queue.remove_front(&imei).await?;
+                    }
+                    Ok(None) => {
+                        fail_command(jetstream, &command_queue, &command, CommandError::Timeout)
+                            .await?;
+                        // Codec12 responses carry no request id, so a late reply
+                        // would be taken as the next command's response.
+                        // Reconnect to start from a clean stream.
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("timed out waiting for response to {}", command.request_id),
+                        ));
+                    }
+                    Err(_err) => {
+                        #[cfg(debug_assertions)]
+                        let err = &_err;
 
-                    #[cfg(debug_assertions)]
-                    eprintln!(
-                        "command execution failed for {imei}: {err}; command remains queued"
-                    );
-                    return Err(_err);
+                        #[cfg(debug_assertions)]
+                        eprintln!(
+                            "command execution failed for {imei}: {err}; command remains queued (attempt {})",
+                            command.attempts
+                        );
+                        return Err(_err);
+                    }
                 }
-
-                command_queue.remove_front(&imei).await?;
             }
         }
 
@@ -147,7 +185,7 @@ async fn execute_queued_command(
     make: UnitMake,
     command: &QueuedCommand,
     rfid_publisher: &RfidEnrollmentPublisher,
-) -> io::Result<()> {
+) -> io::Result<Option<String>> {
     let frame = build_command_frame(&command.command);
     socket.write_all(&frame).await?;
     socket.flush().await?;
@@ -158,20 +196,35 @@ async fn execute_queued_command(
         command.request_id, imei, command.command
     );
 
+    // Ok(None) means the device didn't answer in time.
     let response_timeout = Duration::from_millis(command.timeout_ms.unwrap_or(30_000));
-    let response = timeout(
+    match timeout(
         response_timeout,
         wait_for_command_response(socket, acc, jetstream, imei, make, rfid_publisher),
     )
     .await
-    .map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::TimedOut,
-            format!("timed out waiting for response to {}", command.request_id),
-        )
-    })??;
+    {
+        Ok(response) => response.map(Some),
+        Err(_) => Ok(None),
+    }
+}
 
-    publish_command_result(jetstream, imei, command, response, true).await
+async fn fail_command(
+    jetstream: &Context,
+    command_queue: &CommandQueue,
+    command: &QueuedCommand,
+    error: CommandError,
+) -> io::Result<()> {
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "failing command {} for {}: {error:?}",
+        command.request_id, command.imei
+    );
+
+    nats_publish_command_response(jetstream, &CommandResponsePayload::failure(command, error))
+        .await?;
+    command_queue.remove_front(&command.imei).await?;
+    Ok(())
 }
 
 async fn wait_for_command_response(
@@ -281,26 +334,6 @@ async fn handle_avl_frame(
     );
 
     teltonika_write_frame_ack(socket, data.record_count).await
-}
-
-async fn publish_command_result(
-    jetstream: &Context,
-    imei: &str,
-    command: &QueuedCommand,
-    response: String,
-    ok: bool,
-) -> io::Result<()> {
-    nats_publish_command_response(
-        jetstream,
-        &CommandResponsePayload {
-            request_id: command.request_id.clone(),
-            imei: imei.to_string(),
-            command: command.command.clone(),
-            response,
-            ok,
-        },
-    )
-    .await
 }
 
 /// Upper bound for a frame's data field. Real AVL packets are ~1-2 KB and

@@ -1,4 +1,8 @@
-use std::{io, sync::Arc, time::Duration};
+use std::{
+    io,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use async_nats::jetstream::{
     consumer::{self, AckPolicy},
@@ -11,12 +15,21 @@ use tokio::sync::Notify;
 
 use crate::redis::{RedisClient, redis_connect};
 
+/// Sends of a command that ended without a result (e.g. the device
+/// disconnected mid-command) before it is failed with `max_attempts`.
+pub const MAX_COMMAND_ATTEMPTS: u32 = 3;
+const DEFAULT_COMMAND_TTL_SECS: u64 = 24 * 60 * 60;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommandPayload {
     pub request_id: String,
     pub command: String,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// Unix ms after which the command is failed instead of sent. Defaults to
+    /// now + `COMMAND_TTL_SECS` (24h).
+    #[serde(default)]
+    pub expires_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +38,29 @@ pub struct QueuedCommand {
     pub request_id: String,
     pub command: String,
     pub timeout_ms: Option<u64>,
+    // Defaulted so commands queued before these fields existed still load;
+    // those never expire.
+    #[serde(default)]
+    pub expires_at_ms: Option<u64>,
+    #[serde(default)]
+    pub attempts: u32,
+}
+
+impl QueuedCommand {
+    pub fn is_expired(&self) -> bool {
+        self.expires_at_ms.is_some_and(|expires_at_ms| now_ms() >= expires_at_ms)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandError {
+    /// The device did not answer within `timeout_ms`.
+    Timeout,
+    /// `expires_at_ms` passed before the command could be sent.
+    Expired,
+    /// The command was sent `MAX_COMMAND_ATTEMPTS` times without a result.
+    MaxAttempts,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -34,6 +70,31 @@ pub struct CommandResponsePayload {
     pub command: String,
     pub response: String,
     pub ok: bool,
+    pub error: Option<CommandError>,
+}
+
+impl CommandResponsePayload {
+    pub fn success(command: &QueuedCommand, response: String) -> Self {
+        Self {
+            request_id: command.request_id.clone(),
+            imei: command.imei.clone(),
+            command: command.command.clone(),
+            response,
+            ok: true,
+            error: None,
+        }
+    }
+
+    pub fn failure(command: &QueuedCommand, error: CommandError) -> Self {
+        Self {
+            request_id: command.request_id.clone(),
+            imei: command.imei.clone(),
+            command: command.command.clone(),
+            response: String::new(),
+            ok: false,
+            error: Some(error),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -120,6 +181,23 @@ impl CommandQueue {
         Ok(Some(command))
     }
 
+    /// Persists an incremented attempt count before the command is sent, so a
+    /// crash or disconnect mid-command still counts towards the limit.
+    pub async fn record_attempt(&self, command: &QueuedCommand) -> io::Result<()> {
+        let mut redis = self.connection().await?;
+        let payload_key = command_payload_key(&command.imei, &command.request_id);
+        let payload = serde_json::to_string(command).map_err(io::Error::other)?;
+        // XX: don't resurrect a command that was removed in the meantime.
+        let _: Option<String> = redis::cmd("SET")
+            .arg(&payload_key)
+            .arg(payload)
+            .arg("XX")
+            .query_async(&mut redis)
+            .await
+            .map_err(io::Error::other)?;
+        Ok(())
+    }
+
     pub async fn has_pending(&self, imei: &str) -> io::Result<bool> {
         let mut redis = self.connection().await?;
         let len: usize = redis
@@ -136,6 +214,21 @@ impl CommandQueue {
 
         Ok(())
     }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn command_ttl() -> Duration {
+    let secs = dotenvy::var("COMMAND_TTL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_COMMAND_TTL_SECS);
+    Duration::from_secs(secs)
 }
 
 fn command_payload_key(imei: &str, req_id: &str) -> String {
@@ -200,11 +293,17 @@ async fn handle_message(
     let imei = parse_subject(subject)?;
     let payload: CommandPayload = serde_json::from_slice(payload).map_err(io::Error::other)?;
 
+    let expires_at_ms = payload
+        .expires_at_ms
+        .unwrap_or_else(|| now_ms().saturating_add(command_ttl().as_millis() as u64));
+
     let queued_command = QueuedCommand {
         imei,
         request_id: payload.request_id,
         command: payload.command,
         timeout_ms: payload.timeout_ms,
+        expires_at_ms: Some(expires_at_ms),
+        attempts: 0,
     };
 
     let _queue_len = command_queue.enqueue(queued_command.clone()).await?;
@@ -252,7 +351,59 @@ fn command_subject() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{command_subject, parse_subject};
+    use super::{
+        CommandError, CommandResponsePayload, QueuedCommand, command_subject, now_ms,
+        parse_subject,
+    };
+
+    fn queued(expires_at_ms: Option<u64>) -> QueuedCommand {
+        QueuedCommand {
+            imei: "123456789012345".to_string(),
+            request_id: "req-1".to_string(),
+            command: "getinfo".to_string(),
+            timeout_ms: None,
+            expires_at_ms,
+            attempts: 0,
+        }
+    }
+
+    #[test]
+    fn loads_commands_queued_before_attempts_and_expiry_existed() {
+        let command: QueuedCommand = serde_json::from_str(
+            r#"{"imei":"123456789012345","request_id":"req-1","command":"getinfo","timeout_ms":null}"#,
+        )
+        .unwrap();
+
+        assert_eq!(command.attempts, 0);
+        assert_eq!(command.expires_at_ms, None);
+        assert!(!command.is_expired());
+    }
+
+    #[test]
+    fn expires_commands_past_their_deadline() {
+        assert!(queued(Some(now_ms() - 1)).is_expired());
+        assert!(!queued(Some(now_ms() + 60_000)).is_expired());
+    }
+
+    #[test]
+    fn serializes_failure_responses_with_an_error_code() {
+        let payload = CommandResponsePayload::failure(&queued(None), CommandError::MaxAttempts);
+
+        assert_eq!(
+            serde_json::to_string(&payload).unwrap(),
+            r#"{"request_id":"req-1","imei":"123456789012345","command":"getinfo","response":"","ok":false,"error":"max_attempts"}"#
+        );
+    }
+
+    #[test]
+    fn serializes_success_responses_with_a_null_error() {
+        let payload = CommandResponsePayload::success(&queued(None), "OK".to_string());
+
+        assert_eq!(
+            serde_json::to_string(&payload).unwrap(),
+            r#"{"request_id":"req-1","imei":"123456789012345","command":"getinfo","response":"OK","ok":true,"error":null}"#
+        );
+    }
 
     #[test]
     fn parses_command_subject() {
