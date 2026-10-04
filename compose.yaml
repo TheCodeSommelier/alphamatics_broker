@@ -16,9 +16,12 @@ services:
       - "/data"
     volumes:
       - nats-data:/data
+    # NATS has no auth configured. The client port must stay restricted by the
+    # security group to the backend; the monitoring port is loopback-only (use
+    # an SSH tunnel to reach it).
     ports:
       - "4222:4222"
-      - "8222:8222"
+      - "127.0.0.1:8222:8222"
     restart: unless-stopped
   broker:
     image: "${BROKER_IMAGE:-broker:local}"
@@ -29,10 +32,6 @@ services:
       target: final
     env_file:
       - .env
-    environment:
-      NATS_MAX_AGE_HOURS: "${NATS_MAX_AGE_HOURS:-72}"
-      NATS_TELEMATICS_MAX_BYTES: "${NATS_TELEMATICS_MAX_BYTES:?NATS_TELEMATICS_MAX_BYTES must be set}"
-      NATS_COMMANDS_MAX_BYTES: "${NATS_COMMANDS_MAX_BYTES:?NATS_COMMANDS_MAX_BYTES must be set}"
     ports:
       - 4001:4001
     depends_on:
@@ -44,36 +43,3 @@ volumes:
     # Stable across Compose project-name or checkout changes. Docker stores
     # this volume in its data root on the host filesystem.
     name: alphamatics-broker-nats-data
-
-# The commented out section below is an example of how to define a PostgreSQL
-# database that your application can use. `depends_on` tells Docker Compose to
-# start the database before your application. The `db-data` volume persists the
-# database data between container restarts. The `db-password` secret is used
-# to set the database password. You must create `db/password.txt` and add
-# a password of your choosing to it before running `docker compose up`.
-#     depends_on:
-#       db:
-#         condition: service_healthy
-#   db:
-#     image: postgres
-#     restart: always
-#     user: postgres
-#     secrets:
-#       - db-password
-#     volumes:
-#       - db-data:/var/lib/postgresql/data
-#     environment:
-#       - POSTGRES_DB=example
-#       - POSTGRES_PASSWORD_FILE=/run/secrets/db-password
-#     expose:
-#       - 5432
-#     healthcheck:
-#       test: [ "CMD", "pg_isready" ]
-#       interval: 10s
-#       timeout: 5s
-#       retries: 5
-# volumes:
-#   db-data:
-# secrets:
-#   db-password:
-#     file: db/password.txt

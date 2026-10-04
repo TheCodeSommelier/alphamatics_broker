@@ -5,9 +5,12 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     time::{Duration, timeout},
 };
+use tracing::{debug, error, info, warn};
 
 use crate::{
-    commands::{CommandQueue, CommandResponsePayload, QueuedCommand},
+    commands::{
+        CommandError, CommandQueue, CommandResponsePayload, MAX_COMMAND_ATTEMPTS, QueuedCommand,
+    },
     db::UnitMake,
     nats::{nats_publish, nats_publish_command_response},
     rfid::RfidEnrollmentPublisher,
@@ -15,7 +18,7 @@ use crate::{
         codec12::{build_command_frame, parse_response_frame},
         data_parser::teltonika_parse_frame,
         errors::TeltonikaFrameError,
-        utils::{teltonika_write_frame_ack, teltonika_write_imei_handshake},
+        utils::{crc16_ibm, teltonika_write_frame_ack, teltonika_write_imei_handshake},
     },
 };
 
@@ -35,14 +38,10 @@ pub async fn teltonika_listen(
     command_queue: CommandQueue,
     rfid_publisher: RfidEnrollmentPublisher,
 ) -> io::Result<()> {
-    #[cfg(debug_assertions)]
-    let peer_addr = socket.peer_addr().ok();
-
     teltonika_write_imei_handshake(&mut socket, accepted).await?;
 
     if !accepted {
-        #[cfg(debug_assertions)]
-        println!("Rejected IMEI {imei}, closing connection.");
+        debug!("rejected IMEI, closing connection");
         return Ok(());
     }
 
@@ -51,8 +50,24 @@ pub async fn teltonika_listen(
 
     loop {
         if ready_for_commands {
-            while let Some(command) = command_queue.peek(&imei).await? {
-                if let Err(_err) = execute_queued_command(
+            while let Some(mut command) = command_queue.peek(&imei).await? {
+                let rejection = if command.is_expired() {
+                    Some(CommandError::Expired)
+                } else if command.attempts >= MAX_COMMAND_ATTEMPTS {
+                    Some(CommandError::MaxAttempts)
+                } else {
+                    None
+                };
+
+                if let Some(error) = rejection {
+                    fail_command(jetstream, &command_queue, &command, error).await?;
+                    continue;
+                }
+
+                command.attempts += 1;
+                command_queue.record_attempt(&command).await?;
+
+                match execute_queued_command(
                     &mut socket,
                     &mut acc,
                     jetstream,
@@ -63,17 +78,35 @@ pub async fn teltonika_listen(
                 )
                 .await
                 {
-                    #[cfg(debug_assertions)]
-                    let err = &_err;
-
-                    #[cfg(debug_assertions)]
-                    eprintln!(
-                        "command execution failed for {imei}: {err}; command remains queued"
-                    );
-                    return Err(_err);
+                    Ok(Some(response)) => {
+                        nats_publish_command_response(
+                            jetstream,
+                            &CommandResponsePayload::success(&command, response),
+                        )
+                        .await?;
+                        command_queue.remove_front(&imei).await?;
+                    }
+                    Ok(None) => {
+                        fail_command(jetstream, &command_queue, &command, CommandError::Timeout)
+                            .await?;
+                        // Codec12 responses carry no request id, so a late reply
+                        // would be taken as the next command's response.
+                        // Reconnect to start from a clean stream.
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("timed out waiting for response to {}", command.request_id),
+                        ));
+                    }
+                    Err(err) => {
+                        warn!(
+                            request_id = %command.request_id,
+                            attempt = command.attempts,
+                            error = %err,
+                            "command interrupted, left queued for retry"
+                        );
+                        return Err(err);
+                    }
                 }
-
-                command_queue.remove_front(&imei).await?;
             }
         }
 
@@ -84,14 +117,13 @@ pub async fn teltonika_listen(
                     let n = read?;
 
                     if n == 0 {
-                        #[cfg(debug_assertions)]
-                        println!("Client disconnected: {:?}", peer_addr);
+                        debug!("device disconnected");
                         return Ok(());
                     }
 
                     acc.extend_from_slice(&buf[..n]);
 
-                while let Some(frame) = try_extract_frame(&mut acc) {
+                while let Some(frame) = try_extract_frame(&mut acc)? {
                     if handle_unsolicited_frame(
                         &mut socket,
                         jetstream,
@@ -114,14 +146,13 @@ pub async fn teltonika_listen(
             let n = socket.read(&mut buf).await?;
 
             if n == 0 {
-                #[cfg(debug_assertions)]
-                println!("Client disconnected: {:?}", peer_addr);
+                debug!("device disconnected");
                 return Ok(());
             }
 
             acc.extend_from_slice(&buf[..n]);
 
-            while let Some(frame) = try_extract_frame(&mut acc) {
+            while let Some(frame) = try_extract_frame(&mut acc)? {
                 if handle_unsolicited_frame(
                     &mut socket,
                     jetstream,
@@ -147,31 +178,43 @@ async fn execute_queued_command(
     make: UnitMake,
     command: &QueuedCommand,
     rfid_publisher: &RfidEnrollmentPublisher,
-) -> io::Result<()> {
+) -> io::Result<Option<String>> {
     let frame = build_command_frame(&command.command);
     socket.write_all(&frame).await?;
     socket.flush().await?;
 
-    #[cfg(debug_assertions)]
-    println!(
-        "Sent Codec12 command {} to IMEI {}: {:?}",
-        command.request_id, imei, command.command
+    info!(
+        request_id = %command.request_id,
+        command = %command.command,
+        attempt = command.attempts,
+        "sent command"
     );
 
+    // Ok(None) means the device didn't answer in time.
     let response_timeout = Duration::from_millis(command.timeout_ms.unwrap_or(30_000));
-    let response = timeout(
+    match timeout(
         response_timeout,
         wait_for_command_response(socket, acc, jetstream, imei, make, rfid_publisher),
     )
     .await
-    .map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::TimedOut,
-            format!("timed out waiting for response to {}", command.request_id),
-        )
-    })??;
+    {
+        Ok(response) => response.map(Some),
+        Err(_) => Ok(None),
+    }
+}
 
-    publish_command_result(jetstream, imei, command, response, true).await
+async fn fail_command(
+    jetstream: &Context,
+    command_queue: &CommandQueue,
+    command: &QueuedCommand,
+    error: CommandError,
+) -> io::Result<()> {
+    warn!(request_id = %command.request_id, ?error, "command failed");
+
+    nats_publish_command_response(jetstream, &CommandResponsePayload::failure(command, error))
+        .await?;
+    command_queue.remove_front(&command.imei).await?;
+    Ok(())
 }
 
 async fn wait_for_command_response(
@@ -183,7 +226,7 @@ async fn wait_for_command_response(
     rfid_publisher: &RfidEnrollmentPublisher,
 ) -> io::Result<String> {
     loop {
-        while let Some(frame) = try_extract_frame(acc) {
+        while let Some(frame) = try_extract_frame(acc)? {
             match classify_frame(&frame)? {
                 IncomingFrame::Avl => {
                     handle_avl_frame(socket, jetstream, imei, make, rfid_publisher, frame).await?;
@@ -191,9 +234,8 @@ async fn wait_for_command_response(
                 IncomingFrame::CommandResponse => {
                     return parse_response_frame(&frame);
                 }
-                IncomingFrame::Unsupported(_codec_id) => {
-                    #[cfg(debug_assertions)]
-                    eprintln!("ignoring unsupported Teltonika codec {_codec_id:#x} while waiting for command response");
+                IncomingFrame::Unsupported(codec_id) => {
+                    warn!(codec_id = format!("{codec_id:#x}"), "ignoring unsupported codec");
                 }
             }
         }
@@ -225,15 +267,12 @@ async fn handle_unsolicited_frame(
             Ok(true)
         }
         IncomingFrame::CommandResponse => {
-            let _response = parse_response_frame(&frame)?;
-
-            #[cfg(debug_assertions)]
-            eprintln!("unsolicited Codec12 response from {imei}: {_response}");
+            let response = parse_response_frame(&frame)?;
+            debug!(%response, "ignoring unsolicited Codec12 response");
             Ok(false)
         }
-        IncomingFrame::Unsupported(_codec_id) => {
-            #[cfg(debug_assertions)]
-            eprintln!("ignoring unsupported Teltonika codec {_codec_id:#x} from {imei}");
+        IncomingFrame::Unsupported(codec_id) => {
+            warn!(codec_id = format!("{codec_id:#x}"), "ignoring unsupported codec");
             Ok(false)
         }
     }
@@ -251,14 +290,13 @@ async fn handle_avl_frame(
         Ok(data) => data,
         Err(err) => {
             if let Some(ack_record_count) = err.ack_record_count() {
-                #[cfg(debug_assertions)]
-                eprintln!("discarded frame: {err}");
+                warn!(error = %err, "discarded frame");
                 teltonika_write_frame_ack(socket, ack_record_count).await?;
             } else {
                 match err {
-                    TeltonikaFrameError::Parse(_err) => {
-                        #[cfg(debug_assertions)]
-                        eprintln!("parse error: {_err}");
+                    // Not acked, so the device will keep resending this frame.
+                    TeltonikaFrameError::Parse(err) => {
+                        error!(error = %err, frame = %hex::encode(&frame), "failed to parse AVL frame");
                     }
                     TeltonikaFrameError::Discarded { .. } => unreachable!(),
                 }
@@ -270,65 +308,68 @@ async fn handle_avl_frame(
     nats_publish(jetstream, &data, imei, make).await?;
 
     if let Err(err) = rfid_publisher.publish_scan(&data).await {
-        sentry::capture_error(&err);
-        eprintln!("failed to publish RFID scan for {imei}: {err}");
+        error!(error = %err, "failed to publish RFID scan");
     }
 
-    #[cfg(debug_assertions)]
-    println!(
-        "Frame ingested for IMEI {imei} ({} records)",
-        data.record_count
-    );
+    debug!(records = data.record_count, "frame ingested");
 
     teltonika_write_frame_ack(socket, data.record_count).await
 }
 
-async fn publish_command_result(
-    jetstream: &Context,
-    imei: &str,
-    command: &QueuedCommand,
-    response: String,
-    ok: bool,
-) -> io::Result<()> {
-    nats_publish_command_response(
-        jetstream,
-        &CommandResponsePayload {
-            request_id: command.request_id.clone(),
-            imei: imei.to_string(),
-            command: command.command.clone(),
-            response,
-            ok,
-        },
-    )
-    .await
-}
+/// Upper bound for a frame's data field. Real AVL packets are ~1-2 KB and
+/// Codec12 responses are small; this only stops a bogus length header from
+/// making us buffer gigabytes.
+const MAX_FRAME_DATA_LEN: usize = 64 * 1024;
 
-fn try_extract_frame(acc: &mut Vec<u8>) -> Option<Vec<u8>> {
-    if acc.len() < 8 {
-        return None;
-    }
-
-    if acc[0..4] != [0, 0, 0, 0] {
-        if let Some(pos) = acc.windows(4).position(|w| w == [0, 0, 0, 0]) {
-            acc.drain(..pos);
-        } else {
-            acc.clear();
-            return None;
+/// Pulls the next complete, CRC-valid frame out of `acc`. Frames failing the
+/// CRC are dropped without an ack so the device retransmits them. A length
+/// header over `MAX_FRAME_DATA_LEN` is an error that closes the connection.
+fn try_extract_frame(acc: &mut Vec<u8>) -> io::Result<Option<Vec<u8>>> {
+    loop {
+        if acc.len() < 8 {
+            return Ok(None);
         }
+
+        if acc[0..4] != [0, 0, 0, 0] {
+            if let Some(pos) = acc.windows(4).position(|w| w == [0, 0, 0, 0]) {
+                acc.drain(..pos);
+            } else {
+                acc.clear();
+                return Ok(None);
+            }
+        }
+
+        if acc.len() < 8 {
+            return Ok(None);
+        }
+
+        let data_len = u32::from_be_bytes(acc[4..8].try_into().unwrap()) as usize;
+        if data_len > MAX_FRAME_DATA_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("frame data length {data_len} exceeds {MAX_FRAME_DATA_LEN}"),
+            ));
+        }
+
+        let frame_len = 8 + data_len + 4;
+        if acc.len() < frame_len {
+            return Ok(None);
+        }
+
+        let frame: Vec<u8> = acc.drain(..frame_len).collect();
+        let expected_crc = u32::from_be_bytes(frame[8 + data_len..].try_into().unwrap());
+        let actual_crc = crc16_ibm(&frame[8..8 + data_len]) as u32;
+
+        if expected_crc == actual_crc {
+            return Ok(Some(frame));
+        }
+
+        warn!(
+            expected = format!("{expected_crc:#x}"),
+            actual = format!("{actual_crc:#x}"),
+            "dropping frame with CRC mismatch"
+        );
     }
-
-    if acc.len() < 8 {
-        return None;
-    }
-
-    let data_len = u32::from_be_bytes(acc[4..8].try_into().unwrap()) as usize;
-    let frame_len = 8 + data_len + 4;
-
-    if acc.len() < frame_len {
-        return None;
-    }
-
-    Some(acc.drain(..frame_len).collect())
 }
 
 fn classify_frame(frame: &[u8]) -> io::Result<IncomingFrame> {
@@ -350,4 +391,57 @@ enum IncomingFrame {
     Avl,
     CommandResponse,
     Unsupported(u8),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_FRAME_DATA_LEN, try_extract_frame};
+
+    // Codec12 getio response with a valid CRC.
+    const VALID_FRAME: &str = "00000000000000370c01060000002f4449313a31204449323a30204449333a302041494e313a302041494e323a313639323420444f313a3020444f323a3101000066e3";
+
+    fn valid_frame() -> Vec<u8> {
+        hex::decode(VALID_FRAME).unwrap()
+    }
+
+    #[test]
+    fn extracts_a_valid_frame_and_leaves_the_rest() {
+        let mut acc = valid_frame();
+        acc.extend_from_slice(&[0, 0]);
+
+        assert_eq!(try_extract_frame(&mut acc).unwrap(), Some(valid_frame()));
+        assert_eq!(acc, vec![0, 0]);
+    }
+
+    #[test]
+    fn waits_for_a_partial_frame() {
+        let frame = valid_frame();
+        let mut acc = frame[..frame.len() - 1].to_vec();
+
+        assert_eq!(try_extract_frame(&mut acc).unwrap(), None);
+        assert_eq!(acc.len(), frame.len() - 1);
+    }
+
+    #[test]
+    fn drops_a_frame_with_a_bad_crc_and_returns_the_next_one() {
+        let mut corrupted = valid_frame();
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 0xFF;
+
+        let mut acc = corrupted;
+        acc.extend_from_slice(&valid_frame());
+
+        assert_eq!(try_extract_frame(&mut acc).unwrap(), Some(valid_frame()));
+        assert!(acc.is_empty());
+    }
+
+    #[test]
+    fn rejects_an_oversized_length_header() {
+        let mut acc = vec![0, 0, 0, 0];
+        acc.extend_from_slice(&((MAX_FRAME_DATA_LEN + 1) as u32).to_be_bytes());
+
+        let err = try_extract_frame(&mut acc).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
 }

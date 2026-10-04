@@ -44,3 +44,21 @@ pub async fn teltonika_write_frame_ack(stream: &mut TcpStream, record_count: u8)
     stream.flush().await?;
     Ok(())
 }
+
+/// CRC-16/IBM over a frame's data field, as used by every Teltonika codec.
+pub fn crc16_ibm(data: &[u8]) -> u16 {
+    let mut crc = 0u16;
+
+    for &byte in data {
+        crc ^= byte as u16;
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xA001;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+
+    crc
+}

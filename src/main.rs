@@ -1,11 +1,19 @@
 use async_nats::jetstream::Context;
-use deadpool_postgres::Pool;
-use std::io;
-use tokio::net::{TcpListener, TcpStream};
+use socket2::{SockRef, TcpKeepalive};
+use std::{
+    io::{self, IsTerminal},
+    time::Duration,
+};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    time::{sleep, timeout},
+};
+use tracing::{Instrument, Span, debug, error, field, info, info_span, warn};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{
-    commands::{CommandQueue, run_command_listener},
-    db::{build_pool, get_unit_make},
+    commands::{CommandQueue, supervise_command_listener},
+    db::{UnitCache, build_pool},
     nats::nats_connect,
     rfid::RfidEnrollmentPublisher,
     units::teltonika::{teltonika_listen, utils::teltonika_read_imei},
@@ -18,36 +26,51 @@ mod redis;
 mod rfid;
 mod units;
 
+/// A device must send its IMEI this soon after connecting. Also bounds NLB
+/// health checks and port scanners that connect and never speak.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Backoff after a failed accept (e.g. EMFILE) instead of spinning or exiting.
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Detects dead peers (devices dropping off GSM without a FIN) and keeps NLB
+/// flows alive past its 350s idle timeout.
+fn enable_keepalive(socket: &TcpStream) -> io::Result<()> {
+    let keepalive = TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(15))
+        .with_retries(4);
+
+    SockRef::from(socket).set_tcp_keepalive(&keepalive)
+}
+
 async fn process_socket(
     mut socket: TcpStream,
-    pool: &Pool,
+    units: &UnitCache,
     jetstream: &Context,
     command_queue: CommandQueue,
     rfid_publisher: RfidEnrollmentPublisher,
 ) -> io::Result<()> {
-    #[cfg(debug_assertions)]
-    let peer_addr = socket.peer_addr().ok();
+    enable_keepalive(&socket)?;
 
-    #[cfg(debug_assertions)]
-    println!("Peer addr: {:?}", peer_addr);
+    let imei = timeout(HANDSHAKE_TIMEOUT, teltonika_read_imei(&mut socket))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "timed out waiting for IMEI"))??;
 
-    let imei = teltonika_read_imei(&mut socket).await?;
+    Span::current().record("imei", imei.as_str());
 
-    #[cfg(debug_assertions)]
-    println!("IMEI: {imei}");
-
-    let make = match get_unit_make(pool, &imei).await {
+    let make = match units.get_unit_make(&imei).await {
         Ok(Some(make)) => make,
-        Ok(None) => return Ok(()),
-        Err(_err) => {
-            #[cfg(debug_assertions)]
-            let err = _err;
-
-            #[cfg(debug_assertions)]
-            eprintln!("imei lookup error: {err}");
+        Ok(None) => {
+            info!("unknown IMEI, closing connection");
+            return Ok(());
+        }
+        Err(err) => {
+            error!(error = %err, "IMEI lookup failed");
             return Ok(());
         }
     };
+
+    debug!(?make, "device connected");
 
     let accepted = true;
     teltonika_listen(
@@ -62,66 +85,83 @@ async fn process_socket(
     .await
 }
 
+/// Ordinary ways for a device connection to end (GSM drops, NLB health
+/// checks) stay at debug so they don't drown out real problems.
+fn log_connection_error(err: &io::Error) {
+    match err.kind() {
+        io::ErrorKind::UnexpectedEof
+        | io::ErrorKind::ConnectionReset
+        | io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::BrokenPipe => debug!(error = %err, "connection closed"),
+        _ => warn!(error = %err, "connection failed"),
+    }
+}
+
 async fn tokio_main() -> io::Result<()> {
     let addr = dotenvy::var("ADDR").unwrap_or("127.0.0.1:4001".to_string());
 
-    #[cfg(debug_assertions)]
-    println!("Binding broker listener on {addr}...");
-
     let listener = TcpListener::bind(&addr).await?;
+    let units = UnitCache::new(build_pool()?);
 
-    #[cfg(debug_assertions)]
-    println!("Building database pool...");
-
-    let pool = build_pool()?;
-
-    #[cfg(debug_assertions)]
-    println!("Connecting to NATS...");
-
+    info!("connecting to NATS");
     let jetstream = nats_connect().await?;
-
-    #[cfg(debug_assertions)]
-    println!("Connecting to Redis...");
 
     let command_queue = CommandQueue::connect()?;
     let rfid_publisher = RfidEnrollmentPublisher::connect(jetstream.client())?;
-    let command_listener = run_command_listener(jetstream.clone(), command_queue.clone());
 
-    tokio::spawn(async move {
-        if let Err(err) = command_listener.await {
-            sentry::capture_error(&err);
-            eprintln!("CRITICAL: command listener stopped: {err}");
-        }
-    });
+    tokio::spawn(supervise_command_listener(
+        jetstream.clone(),
+        command_queue.clone(),
+    ));
 
-    #[cfg(debug_assertions)]
-    println!("Broker listening on {addr}");
+    info!(%addr, "broker listening");
 
     loop {
-        let (socket, _) = listener.accept().await?;
-        let pool = pool.clone();
+        let (socket, peer) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(err) => {
+                // Usually fd exhaustion; existing connections are still fine,
+                // so back off and keep serving rather than taking them down.
+                error!(error = %err, "accept failed");
+                sleep(ACCEPT_ERROR_BACKOFF).await;
+                continue;
+            }
+        };
+        let units = units.clone();
         let jetstream = jetstream.clone();
         let command_queue = command_queue.clone();
         let rfid_publisher = rfid_publisher.clone();
+        let span = info_span!("connection", %peer, imei = field::Empty);
 
-        tokio::spawn(async move {
-            if let Err(_err) = process_socket(
-                socket,
-                &pool,
-                &jetstream,
-                command_queue,
-                rfid_publisher,
-            )
-            .await
-            {
-                #[cfg(debug_assertions)]
-                let err = _err;
-
-                #[cfg(debug_assertions)]
-                eprintln!("socket error: {err}");
+        tokio::spawn(
+            async move {
+                if let Err(err) = process_socket(
+                    socket,
+                    &units,
+                    &jetstream,
+                    command_queue,
+                    rfid_publisher,
+                )
+                .await
+                {
+                    log_connection_error(&err);
+                }
             }
-        });
+            .instrument(span),
+        );
     }
+}
+
+/// Logs to stdout (level from RUST_LOG, default info). Errors also become
+/// Sentry events; warnings and info become breadcrumbs on them.
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_ansi(io::stdout().is_terminal()))
+        .with(sentry::integrations::tracing::layer())
+        .init();
 }
 
 fn main() -> io::Result<()> {
@@ -140,14 +180,15 @@ fn main() -> io::Result<()> {
         },
     ));
 
+    init_tracing();
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(io::Error::other)?;
 
     if let Err(err) = runtime.block_on(tokio_main()) {
-        sentry::capture_error(&err);
-        eprintln!("CRITICAL: broker stopped: {err}");
+        error!(error = %err, "broker stopped");
         return Err(err);
     }
 
