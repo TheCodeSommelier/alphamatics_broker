@@ -1,11 +1,14 @@
 use async_nats::jetstream::Context;
-use deadpool_postgres::Pool;
-use std::io;
-use tokio::net::{TcpListener, TcpStream};
+use socket2::{SockRef, TcpKeepalive};
+use std::{io, time::Duration};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    time::{sleep, timeout},
+};
 
 use crate::{
     commands::{CommandQueue, run_command_listener},
-    db::{build_pool, get_unit_make},
+    db::{UnitCache, build_pool},
     nats::nats_connect,
     rfid::RfidEnrollmentPublisher,
     units::teltonika::{teltonika_listen, utils::teltonika_read_imei},
@@ -18,9 +21,26 @@ mod redis;
 mod rfid;
 mod units;
 
+/// A device must send its IMEI this soon after connecting. Also bounds NLB
+/// health checks and port scanners that connect and never speak.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Backoff after a failed accept (e.g. EMFILE) instead of spinning or exiting.
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Detects dead peers (devices dropping off GSM without a FIN) and keeps NLB
+/// flows alive past its 350s idle timeout.
+fn enable_keepalive(socket: &TcpStream) -> io::Result<()> {
+    let keepalive = TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(15))
+        .with_retries(4);
+
+    SockRef::from(socket).set_tcp_keepalive(&keepalive)
+}
+
 async fn process_socket(
     mut socket: TcpStream,
-    pool: &Pool,
+    units: &UnitCache,
     jetstream: &Context,
     command_queue: CommandQueue,
     rfid_publisher: RfidEnrollmentPublisher,
@@ -31,12 +51,16 @@ async fn process_socket(
     #[cfg(debug_assertions)]
     println!("Peer addr: {:?}", peer_addr);
 
-    let imei = teltonika_read_imei(&mut socket).await?;
+    enable_keepalive(&socket)?;
+
+    let imei = timeout(HANDSHAKE_TIMEOUT, teltonika_read_imei(&mut socket))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "timed out waiting for IMEI"))??;
 
     #[cfg(debug_assertions)]
     println!("IMEI: {imei}");
 
-    let make = match get_unit_make(pool, &imei).await {
+    let make = match units.get_unit_make(&imei).await {
         Ok(Some(make)) => make,
         Ok(None) => return Ok(()),
         Err(_err) => {
@@ -73,7 +97,7 @@ async fn tokio_main() -> io::Result<()> {
     #[cfg(debug_assertions)]
     println!("Building database pool...");
 
-    let pool = build_pool()?;
+    let units = UnitCache::new(build_pool()?);
 
     #[cfg(debug_assertions)]
     println!("Connecting to NATS...");
@@ -98,8 +122,17 @@ async fn tokio_main() -> io::Result<()> {
     println!("Broker listening on {addr}");
 
     loop {
-        let (socket, _) = listener.accept().await?;
-        let pool = pool.clone();
+        let socket = match listener.accept().await {
+            Ok((socket, _)) => socket,
+            Err(err) => {
+                // Usually fd exhaustion; existing connections are still fine,
+                // so back off and keep serving rather than taking them down.
+                eprintln!("accept error: {err}");
+                sleep(ACCEPT_ERROR_BACKOFF).await;
+                continue;
+            }
+        };
+        let units = units.clone();
         let jetstream = jetstream.clone();
         let command_queue = command_queue.clone();
         let rfid_publisher = rfid_publisher.clone();
@@ -107,7 +140,7 @@ async fn tokio_main() -> io::Result<()> {
         tokio::spawn(async move {
             if let Err(_err) = process_socket(
                 socket,
-                &pool,
+                &units,
                 &jetstream,
                 command_queue,
                 rfid_publisher,
