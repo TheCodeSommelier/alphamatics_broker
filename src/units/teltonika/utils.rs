@@ -1,11 +1,7 @@
-use std::i64;
 use std::io::{Error, ErrorKind, Result};
 
-use chrono::DateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-
-use crate::units::teltonika::types::TeltonikaFrame;
 
 pub async fn teltonika_read_imei(stream: &mut TcpStream) -> Result<String> {
     let mut len_buf = [0u8; 2];
@@ -42,38 +38,27 @@ pub async fn teltonika_write_imei_handshake(stream: &mut TcpStream, accepted: bo
     Ok(())
 }
 
-pub fn teltonika_print(data: &TeltonikaFrame) {
-    println!("============ Start ============");
+pub async fn teltonika_write_frame_ack(stream: &mut TcpStream, record_count: u8) -> Result<()> {
+    let ack = (record_count as u32).to_be_bytes();
+    stream.write_all(&ack).await?;
+    stream.flush().await?;
+    Ok(())
+}
 
-    println!("\n======= Teltonika =======");
-    println!("num of data 1: {:?}", data.record_count);
-    println!("codec_id: {:?}", data.codec_id);
+/// CRC-16/IBM over a frame's data field, as used by every Teltonika codec.
+pub fn crc16_ibm(data: &[u8]) -> u16 {
+    let mut crc = 0u16;
 
-    println!("\n======= Records =======");
-    let records = &data.records;
-
-    for avl_data in records.iter().enumerate() {
-        println!("\n======= AVL generic {:?} =======", avl_data.0);
-        println!("Timestamp: {:?}", avl_data.1.timestamp);
-        println!("Time and date: {:?}", DateTime::from_timestamp_millis(avl_data.1.timestamp as i64));
-        println!("Priority: {:?}", avl_data.1.priority);
-
-        println!("\n======= GPS {:?} =======", avl_data.0);
-        println!("altitude: {:?}", avl_data.1.gps_element.altitude);
-        println!("latitude: {:?}", avl_data.1.gps_element.latitude);
-        println!("longitude: {:?}", avl_data.1.gps_element.longitude);
-        println!("satellites: {:?}", avl_data.1.gps_element.satellites);
-        println!("angle: {:?}", avl_data.1.gps_element.angle);
-        println!("speed: {:?}", avl_data.1.gps_element.speed);
-
-        println!("\n======= IO {:?} =======", avl_data.0);
-        println!("eight_bytes: {:?}", avl_data.1.io_element.eight_bytes);
-        println!("event_io_id: {:?}", avl_data.1.io_element.event_io_id);
-        println!("four_bytes: {:?}", avl_data.1.io_element.four_bytes);
-        println!("n_total: {:?}", avl_data.1.io_element.n_total);
-        println!("one_byte: {:?}", avl_data.1.io_element.one_byte);
-        println!("two_bytes: {:?}", avl_data.1.io_element.two_bytes);
-        println!("x_bytes: {:?}", avl_data.1.io_element.x_bytes);
+    for &byte in data {
+        crc ^= byte as u16;
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xA001;
+            } else {
+                crc >>= 1;
+            }
+        }
     }
-    println!("\n============ END ============");
+
+    crc
 }

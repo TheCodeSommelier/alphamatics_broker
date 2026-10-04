@@ -1,21 +1,85 @@
 name: Deploy Broker
 
+# Every merge to main cuts a release: Cargo.toml/Cargo.lock are versioned from
+# conventional commits, main gets the tag and updated CHANGELOG.md, and a
+# release/vX.Y.Z branch is pushed. That exact release deploys to staging.
+#
+# Production, and any rollback, is a manual run on an existing
+# release/vX.Y.Z branch ("Use workflow from" in the Actions UI).
+
 on:
   push:
     branches:
-      - stage
       - main
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: Environment to deploy
+        required: true
+        default: staging
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  DEPLOY_STAGE: ${{ github.event_name == 'workflow_dispatch' && inputs.stage || 'staging' }}
+
+concurrency:
+  group: deploy-broker-${{ github.event_name == 'workflow_dispatch' && inputs.stage || 'staging' }}
+  cancel-in-progress: false
 
 permissions:
   id-token: write
   contents: read
 
 jobs:
-  deploy:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: checks
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      branch: ${{ steps.shipit.outputs.branch }}
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cut release
+        id: shipit
+        run: |
+          npx --yes --package @sladg/release-utils@3.0.0 utils shipit --changelog \
+            --gitUser "github-actions[bot]" \
+            --gitEmail "41898282+github-actions[bot]@users.noreply.github.com"
+          # shipit leaves the release branch checked out while the tag points
+          # at main's release commit, so resolve the branch from the newest tag.
+          echo "branch=release/$(git tag --list 'v*' --sort=-v:refname | head -n1)" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: [checks, release]
+    # A manual run skips release creation but must still run the deployment.
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.stage || 'staging' }}
+    env:
+      RELEASE_BRANCH: ${{ needs.release.outputs.branch || github.ref_name }}
+
+    steps:
+      - name: Require a release branch
+        if: ${{ !startsWith(env.RELEASE_BRANCH, 'release/v') }}
+        run: |
+          echo "Deploys run from a release/vX.Y.Z branch, not ${RELEASE_BRANCH}." >&2
+          exit 1
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_BRANCH }}
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -27,28 +91,57 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push image
+      - name: Resolve image references
+        id: image
         run: |
-          IMAGE=${{ steps.ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ github.ref_name }}
-          docker build --target final -t $IMAGE .
-          docker push $IMAGE
+          repo="${{ steps.ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}"
+          version="${RELEASE_BRANCH#release/}"
+          {
+            echo "repo=${repo}"
+            echo "release=${repo}:${DEPLOY_STAGE}-${version}"
+          } >> "$GITHUB_OUTPUT"
 
-          if [ "${{ github.ref_name }}" = "main" ]; then
-            docker tag $IMAGE ${{ steps.ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest
-            docker push ${{ steps.ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest
-          fi
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: final
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.image.outputs.release }}
+            ${{ steps.image.outputs.repo }}:${{ env.DEPLOY_STAGE }}
+          cache-from: type=gha,scope=broker
+          cache-to: type=gha,mode=max,scope=broker
 
       - name: Deploy to EC2
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} \
-              | docker login --username AWS --password-stdin ${{ steps.ecr.outputs.registry }}
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          BROKER_IMAGE: ${{ steps.image.outputs.release }}
+        run: |
+          set -euo pipefail
 
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh_opts=(-i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new)
+
+          scp "${ssh_opts[@]}" compose.yaml "${EC2_USER}@${EC2_HOST}:/tmp/compose.yaml"
+          # shellcheck disable=SC2029 # runner values intentionally expand here
+          ssh "${ssh_opts[@]}" "${EC2_USER}@${EC2_HOST}" "set -euo pipefail
+            sudo mkdir -p /opt/broker
+            sudo install -m 0644 /tmp/compose.yaml /opt/broker/compose.yaml
+            aws ecr get-login-password --region ${AWS_REGION} \
+              | docker login --username AWS --password-stdin ${REGISTRY}
+            printf 'BROKER_IMAGE=%s\\n' ${BROKER_IMAGE} \
+              | sudo tee /opt/broker/.image.env > /dev/null
             cd /opt/broker
-            docker compose pull server
-            docker compose up -d server
-            docker image prune -f
+            docker compose -f compose.yaml --env-file .image.env pull broker
+            docker compose -f compose.yaml --env-file .image.env up -d broker
+            docker image prune -af"
