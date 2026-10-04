@@ -1,6 +1,6 @@
 use std::io;
 
-use crate::units::utils::Cur;
+use crate::units::{teltonika::utils::crc16_ibm, utils::Cur};
 
 const CODEC12_ID: u8 = 0x0C;
 const COMMAND_TYPE: u8 = 0x05;
@@ -92,23 +92,6 @@ pub fn parse_response_frame(frame: &[u8]) -> io::Result<String> {
 
     String::from_utf8(response.to_vec())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "codec12 response is not utf-8"))
-}
-
-fn crc16_ibm(data: &[u8]) -> u16 {
-    let mut crc = 0u16;
-
-    for &byte in data {
-        crc ^= byte as u16;
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xA001;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-
-    crc
 }
 
 #[cfg(test)]

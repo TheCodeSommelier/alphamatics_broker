@@ -32,8 +32,13 @@ pub async fn nats_publish(
 
     let payload = serde_json::to_vec(data).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
+    // The second await waits for the stream's ack. The device deletes its
+    // buffered records once we ack the frame, so we must not ack before
+    // JetStream has persisted them.
     jetstream
         .publish(subject, Bytes::from(payload))
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
         .await
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
@@ -53,6 +58,8 @@ pub async fn nats_publish_command_response(
 
     jetstream
         .publish(subject, Bytes::from(payload))
+        .await
+        .map_err(io::Error::other)?
         .await
         .map_err(io::Error::other)?;
 

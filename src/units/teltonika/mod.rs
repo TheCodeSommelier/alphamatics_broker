@@ -15,7 +15,7 @@ use crate::{
         codec12::{build_command_frame, parse_response_frame},
         data_parser::teltonika_parse_frame,
         errors::TeltonikaFrameError,
-        utils::{teltonika_write_frame_ack, teltonika_write_imei_handshake},
+        utils::{crc16_ibm, teltonika_write_frame_ack, teltonika_write_imei_handshake},
     },
 };
 
@@ -91,7 +91,7 @@ pub async fn teltonika_listen(
 
                     acc.extend_from_slice(&buf[..n]);
 
-                while let Some(frame) = try_extract_frame(&mut acc) {
+                while let Some(frame) = try_extract_frame(&mut acc)? {
                     if handle_unsolicited_frame(
                         &mut socket,
                         jetstream,
@@ -121,7 +121,7 @@ pub async fn teltonika_listen(
 
             acc.extend_from_slice(&buf[..n]);
 
-            while let Some(frame) = try_extract_frame(&mut acc) {
+            while let Some(frame) = try_extract_frame(&mut acc)? {
                 if handle_unsolicited_frame(
                     &mut socket,
                     jetstream,
@@ -183,7 +183,7 @@ async fn wait_for_command_response(
     rfid_publisher: &RfidEnrollmentPublisher,
 ) -> io::Result<String> {
     loop {
-        while let Some(frame) = try_extract_frame(acc) {
+        while let Some(frame) = try_extract_frame(acc)? {
             match classify_frame(&frame)? {
                 IncomingFrame::Avl => {
                     handle_avl_frame(socket, jetstream, imei, make, rfid_publisher, frame).await?;
@@ -303,32 +303,56 @@ async fn publish_command_result(
     .await
 }
 
-fn try_extract_frame(acc: &mut Vec<u8>) -> Option<Vec<u8>> {
-    if acc.len() < 8 {
-        return None;
-    }
+/// Upper bound for a frame's data field. Real AVL packets are ~1-2 KB and
+/// Codec12 responses are small; this only stops a bogus length header from
+/// making us buffer gigabytes.
+const MAX_FRAME_DATA_LEN: usize = 64 * 1024;
 
-    if acc[0..4] != [0, 0, 0, 0] {
-        if let Some(pos) = acc.windows(4).position(|w| w == [0, 0, 0, 0]) {
-            acc.drain(..pos);
-        } else {
-            acc.clear();
-            return None;
+/// Pulls the next complete, CRC-valid frame out of `acc`. Frames failing the
+/// CRC are dropped without an ack so the device retransmits them. A length
+/// header over `MAX_FRAME_DATA_LEN` is an error that closes the connection.
+fn try_extract_frame(acc: &mut Vec<u8>) -> io::Result<Option<Vec<u8>>> {
+    loop {
+        if acc.len() < 8 {
+            return Ok(None);
         }
+
+        if acc[0..4] != [0, 0, 0, 0] {
+            if let Some(pos) = acc.windows(4).position(|w| w == [0, 0, 0, 0]) {
+                acc.drain(..pos);
+            } else {
+                acc.clear();
+                return Ok(None);
+            }
+        }
+
+        if acc.len() < 8 {
+            return Ok(None);
+        }
+
+        let data_len = u32::from_be_bytes(acc[4..8].try_into().unwrap()) as usize;
+        if data_len > MAX_FRAME_DATA_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("frame data length {data_len} exceeds {MAX_FRAME_DATA_LEN}"),
+            ));
+        }
+
+        let frame_len = 8 + data_len + 4;
+        if acc.len() < frame_len {
+            return Ok(None);
+        }
+
+        let frame: Vec<u8> = acc.drain(..frame_len).collect();
+        let expected_crc = u32::from_be_bytes(frame[8 + data_len..].try_into().unwrap());
+        let actual_crc = crc16_ibm(&frame[8..8 + data_len]) as u32;
+
+        if expected_crc == actual_crc {
+            return Ok(Some(frame));
+        }
+
+        eprintln!("dropping frame with crc mismatch: expected {expected_crc:#x}, got {actual_crc:#x}");
     }
-
-    if acc.len() < 8 {
-        return None;
-    }
-
-    let data_len = u32::from_be_bytes(acc[4..8].try_into().unwrap()) as usize;
-    let frame_len = 8 + data_len + 4;
-
-    if acc.len() < frame_len {
-        return None;
-    }
-
-    Some(acc.drain(..frame_len).collect())
 }
 
 fn classify_frame(frame: &[u8]) -> io::Result<IncomingFrame> {
@@ -350,4 +374,57 @@ enum IncomingFrame {
     Avl,
     CommandResponse,
     Unsupported(u8),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_FRAME_DATA_LEN, try_extract_frame};
+
+    // Codec12 getio response with a valid CRC.
+    const VALID_FRAME: &str = "00000000000000370c01060000002f4449313a31204449323a30204449333a302041494e313a302041494e323a313639323420444f313a3020444f323a3101000066e3";
+
+    fn valid_frame() -> Vec<u8> {
+        hex::decode(VALID_FRAME).unwrap()
+    }
+
+    #[test]
+    fn extracts_a_valid_frame_and_leaves_the_rest() {
+        let mut acc = valid_frame();
+        acc.extend_from_slice(&[0, 0]);
+
+        assert_eq!(try_extract_frame(&mut acc).unwrap(), Some(valid_frame()));
+        assert_eq!(acc, vec![0, 0]);
+    }
+
+    #[test]
+    fn waits_for_a_partial_frame() {
+        let frame = valid_frame();
+        let mut acc = frame[..frame.len() - 1].to_vec();
+
+        assert_eq!(try_extract_frame(&mut acc).unwrap(), None);
+        assert_eq!(acc.len(), frame.len() - 1);
+    }
+
+    #[test]
+    fn drops_a_frame_with_a_bad_crc_and_returns_the_next_one() {
+        let mut corrupted = valid_frame();
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 0xFF;
+
+        let mut acc = corrupted;
+        acc.extend_from_slice(&valid_frame());
+
+        assert_eq!(try_extract_frame(&mut acc).unwrap(), Some(valid_frame()));
+        assert!(acc.is_empty());
+    }
+
+    #[test]
+    fn rejects_an_oversized_length_header() {
+        let mut acc = vec![0, 0, 0, 0];
+        acc.extend_from_slice(&((MAX_FRAME_DATA_LEN + 1) as u32).to_be_bytes());
+
+        let err = try_extract_frame(&mut acc).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
 }
