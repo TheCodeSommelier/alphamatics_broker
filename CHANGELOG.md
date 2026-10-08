@@ -1,6 +1,12 @@
 # Changelog
 
 
+## [v0.18.0](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v0.17.0...v0.18.0)
+
+* Merge pull request #21 from TheCodeSommelier/feature/serialize-rfid-as-string [[41cc37021deb3e80dbaf24123e28eb0daad94905](https://github.com/TheCodeSommelier/alphamatics_broker/commit/41cc37021deb3e80dbaf24123e28eb0daad94905)]
+* feat: serialize rfid as a string [[7e2e603886cad96471d1b59309dbb4643b7e5253](https://github.com/TheCodeSommelier/alphamatics_broker/commit/7e2e603886cad96471d1b59309dbb4643b7e5253)]
+
+
 ## [v0.17.0](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v0.1.0...v0.17.0)
 
 * Merge pull request #20 from TheCodeSommelier/stage [[da6720c81423c874a739f301e27d6d53dd4e32b6](https://github.com/TheCodeSommelier/alphamatics_broker/commit/da6720c81423c874a739f301e27d6d53dd4e32b6)]
