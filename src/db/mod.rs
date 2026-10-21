@@ -1,12 +1,8 @@
 mod types;
 
-use std::{
-    io,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, io, sync::Arc};
 
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
-use moka::{Expiry, future::Cache};
 use openssl::ssl::{SslConnector, SslMethod};
 use postgres_openssl::MakeTlsConnector;
 use tokio_postgres::{Config, Error as PgError};
@@ -40,77 +36,39 @@ pub fn build_pool() -> io::Result<DbPool> {
     Pool::builder(mgr).max_size(8).build().map_err(other)
 }
 
-const KNOWN_UNIT_TTL: Duration = Duration::from_secs(10 * 60);
-const UNKNOWN_UNIT_TTL: Duration = Duration::from_secs(60);
-const UNIT_CACHE_CAPACITY: u64 = 100_000;
-
-/// Caches IMEI -> make lookups so reconnect storms (deploys, NLB failover)
-/// don't queue every handshake behind the small Postgres pool. Unknown IMEIs
-/// are cached briefly so a newly enrolled unit is picked up within a minute;
-/// lookup errors are never cached.
+/// Snapshot of known units loaded once at startup. Changes to Unit records
+/// take effect when the broker restarts.
+// AVL data has no unit foreign key; this snapshot determines which devices
+// are accepted. Restart the broker after deleting a unit.
 #[derive(Clone)]
 pub struct UnitCache {
-    pool: DbPool,
-    cache: Cache<String, Option<UnitMake>>,
+    units: Arc<HashMap<String, UnitMake>>,
 }
 
 impl UnitCache {
-    pub fn new(pool: DbPool) -> Self {
-        let cache = Cache::builder()
-            .max_capacity(UNIT_CACHE_CAPACITY)
-            .expire_after(UnitTtl)
-            .build();
+    pub async fn load(pool: DbPool) -> io::Result<Self> {
+        let client = pool.get().await.map_err(other)?;
+        let rows = client
+            .query(r#"SELECT imei, make::text FROM "Unit""#, &[])
+            .await
+            .map_err(|e| pg_to_io("unit snapshot lookup err: ", e))?;
 
-        Self { pool, cache }
-    }
-
-    pub async fn get_unit_make(&self, imei: &str) -> io::Result<Option<UnitMake>> {
-        let imei = imei.trim();
-        if imei.is_empty() {
-            return Ok(None);
+        let mut units = HashMap::with_capacity(rows.len());
+        for row in rows {
+            let imei: String = row.get(0);
+            let make: String = row.get(1);
+            if let Some(make) = UnitMake::from_db(&make) {
+                units.insert(imei, make);
+            }
         }
 
-        // Concurrent lookups for the same IMEI share a single query.
-        self.cache
-            .try_get_with(imei.to_string(), get_unit_make(&self.pool, imei))
-            .await
-            .map_err(|err| io::Error::new(err.kind(), err.to_string()))
-    }
-}
-
-struct UnitTtl;
-
-impl Expiry<String, Option<UnitMake>> for UnitTtl {
-    fn expire_after_create(
-        &self,
-        _imei: &String,
-        make: &Option<UnitMake>,
-        _created_at: Instant,
-    ) -> Option<Duration> {
-        Some(if make.is_some() {
-            KNOWN_UNIT_TTL
-        } else {
-            UNKNOWN_UNIT_TTL
+        tracing::info!(count = units.len(), "loaded units from database");
+        Ok(Self {
+            units: Arc::new(units),
         })
     }
-}
 
-// !! If you remove this check you will be excuted at dawn !!
-// We dropped FKs in avl data cuz we have this. Do not muck about with this.
-// Cached through `UnitCache`, which must keep expiring entries so deleted
-// units stop being accepted.
-async fn get_unit_make(pool: &DbPool, imei: &str) -> io::Result<Option<UnitMake>> {
-    let client = pool.get().await.map_err(other)?;
-
-    let row_opt = client
-        .query_opt(r#"SELECT make::text FROM "Unit" WHERE imei = $1"#, &[&imei])
-        .await
-        .map_err(|e| pg_to_io("imei/make lookup err: ", e))?;
-
-    let Some(row) = row_opt else {
-        return Ok(None);
-    };
-
-    let make_str: String = row.get(0);
-    Ok(UnitMake::from_db(&make_str))
+    pub fn get_unit_make(&self, imei: &str) -> Option<UnitMake> {
+        self.units.get(imei.trim()).copied()
+    }
 }

@@ -37,10 +37,6 @@ features = [ "tokio-comp" ]
 version = "0.6"
 features = [ "all" ]
 
-[dependencies.moka]
-version = "0.12"
-features = [ "future" ]
-
 [dependencies.tracing-subscriber]
 version = "0.3"
 features = [ "env-filter" ]

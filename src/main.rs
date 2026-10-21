@@ -58,14 +58,10 @@ async fn process_socket(
 
     Span::current().record("imei", imei.as_str());
 
-    let make = match units.get_unit_make(&imei).await {
-        Ok(Some(make)) => make,
-        Ok(None) => {
+    let make = match units.get_unit_make(&imei) {
+        Some(make) => make,
+        None => {
             info!("unknown IMEI, closing connection");
-            return Ok(());
-        }
-        Err(err) => {
-            error!(error = %err, "IMEI lookup failed");
             return Ok(());
         }
     };
@@ -100,8 +96,7 @@ fn log_connection_error(err: &io::Error) {
 async fn tokio_main() -> io::Result<()> {
     let addr = dotenvy::var("ADDR").unwrap_or("127.0.0.1:4001".to_string());
 
-    let listener = TcpListener::bind(&addr).await?;
-    let units = UnitCache::new(build_pool()?);
+    let units = UnitCache::load(build_pool()?).await?;
 
     info!("connecting to NATS");
     let jetstream = nats_connect().await?;
@@ -114,6 +109,7 @@ async fn tokio_main() -> io::Result<()> {
         command_queue.clone(),
     ));
 
+    let listener = TcpListener::bind(&addr).await?;
     info!(%addr, "broker listening");
 
     loop {
