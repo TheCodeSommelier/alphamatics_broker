@@ -1,6 +1,12 @@
 # Changelog
 
 
+## [v0.19.0](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v0.18.0...v0.19.0)
+
+* Merge pull request #22 from TheCodeSommelier/feature/imei-cache [[66c760cb000071cc97c17d69a31f2091448bd394](https://github.com/TheCodeSommelier/alphamatics_broker/commit/66c760cb000071cc97c17d69a31f2091448bd394)]
+* feat: add imei and make cache in memory [[8396294ef2fd02b31ed0bb5d7b1d25823ca63ab1](https://github.com/TheCodeSommelier/alphamatics_broker/commit/8396294ef2fd02b31ed0bb5d7b1d25823ca63ab1)]
+
+
 ## [v0.18.0](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v0.17.0...v0.18.0)
 
 * Merge pull request #21 from TheCodeSommelier/feature/serialize-rfid-as-string [[41cc37021deb3e80dbaf24123e28eb0daad94905](https://github.com/TheCodeSommelier/alphamatics_broker/commit/41cc37021deb3e80dbaf24123e28eb0daad94905)]
