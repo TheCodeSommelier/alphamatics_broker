@@ -1,5 +1,19 @@
 # Broker
 
+## AWS secrets at startup
+
+The broker loads the JSON secret `alphamatics/dev` from AWS Secrets Manager before
+connecting to its services. Set `AWS_SECRET_ID` in the runtime environment to use
+a different secret. Values found in the secret take precedence over matching
+environment variables; keys absent from the secret still come from the runtime
+environment or `.env`. The process needs AWS credentials with
+`secretsmanager:GetSecretValue` permission and a configured AWS Region. Startup
+fails if the secret cannot be loaded or is not a JSON object of strings.
+
+Code can read the loaded values through `secrets_manager::secrets()` or use
+`secrets_manager::var("DATABASE_URL")` for the secret-first environment fallback.
+Secret values are not printed at startup.
+
 ## JetStream persistence and retention
 
 The NATS container stores JetStream data at `/data`, backed by the stable Docker

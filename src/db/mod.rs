@@ -7,6 +7,8 @@ use openssl::ssl::{SslConnector, SslMethod};
 use postgres_openssl::MakeTlsConnector;
 use tokio_postgres::{Config, Error as PgError};
 
+use crate::config::aws::secrets_manager::var as config_var;
+
 pub use self::types::UnitMake;
 
 fn pg_to_io(context: &'static str, e: PgError) -> io::Error {
@@ -20,7 +22,7 @@ fn other<E: std::fmt::Display>(e: E) -> io::Error {
 pub type DbPool = Pool;
 
 pub fn build_pool() -> io::Result<DbPool> {
-    let db_url = dotenvy::var("DATABASE_URL").map_err(other)?;
+    let db_url = config_var("DATABASE_URL").map_err(other)?;
 
     let pg_cfg: Config = db_url.parse().map_err(other)?;
 

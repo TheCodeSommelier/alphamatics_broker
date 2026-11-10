@@ -14,7 +14,10 @@ use serde::{Deserialize, Serialize};
 use tokio::{sync::Notify, time::sleep};
 use tracing::{error, info, warn};
 
-use crate::redis::{RedisClient, redis_connect};
+use crate::{
+    config::aws::secrets_manager::var as config_var,
+    redis::{RedisClient, redis_connect},
+};
 
 /// Sends of a command that ended without a result (e.g. the device
 /// disconnected mid-command) before it is failed with `max_attempts`.
@@ -231,7 +234,7 @@ fn now_ms() -> u64 {
 }
 
 fn command_ttl() -> Duration {
-    let secs = dotenvy::var("COMMAND_TTL_SECS")
+    let secs = config_var("COMMAND_TTL_SECS")
         .ok()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(DEFAULT_COMMAND_TTL_SECS);
@@ -274,9 +277,9 @@ pub async fn supervise_command_listener(jetstream: Context, command_queue: Comma
 
 async fn run_command_listener(jetstream: Context, command_queue: CommandQueue) -> io::Result<()> {
     let subject = command_subject();
-    let stream_name = dotenvy::var("NATS_COMMAND_STREAM").unwrap_or("COMMANDS".to_string());
+    let stream_name = config_var("NATS_COMMAND_STREAM").unwrap_or("COMMANDS".to_string());
     let consumer_name =
-        dotenvy::var("NATS_COMMAND_CONSUMER").unwrap_or("broker_commands".to_string());
+        config_var("NATS_COMMAND_CONSUMER").unwrap_or("broker_commands".to_string());
     let stream = jetstream
         .get_stream(stream_name)
         .await
@@ -380,8 +383,8 @@ fn parse_subject(subject: &str) -> io::Result<String> {
 }
 
 fn command_subject() -> String {
-    dotenvy::var("NATS_COMMAND_SUBJECT")
-        .or_else(|_| dotenvy::var("NATS_SUBJECT_COMMANDS"))
+    config_var("NATS_COMMAND_SUBJECT")
+        .or_else(|_| config_var("NATS_SUBJECT_COMMANDS"))
         .unwrap_or("units.command.*".to_string())
 }
 
