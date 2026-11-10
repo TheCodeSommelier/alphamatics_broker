@@ -42,10 +42,12 @@ The named volume survives container recreation and normal deployments. Do not
 run `docker compose down --volumes` or remove/prune this volume unless deleting
 the JetStream data is intentional.
 
-Set these values in `/opt/broker/.env` on each host. That file supplies the
-broker container's runtime environment; `.image.env` is deployment metadata and
-contains `BROKER_IMAGE` and `AWS_SECRET_ID`. `NATS_MAX_AGE_HOURS` is optional and defaults to
-72.
+Set the NATS limits as GitHub environment variables for each deployment stage.
+The deploy workflow writes them, `AWS_SECRET_ID`, `ENV`, and `BROKER_IMAGE` to
+`/opt/broker/.image.env`; Compose passes the configuration values to the broker
+container. The host `/opt/broker/.env` file is no longer used. For local Compose
+runs, provide the required byte limits through the shell environment or a local
+`.env` file. `NATS_MAX_AGE_HOURS` is optional and defaults to 72.
 
 Use `-f compose.yaml` for manual lifecycle commands when the host still has a
 legacy `docker-compose.yml`, for example:

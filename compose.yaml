@@ -30,10 +30,12 @@ services:
       args:
         APP_NAME: broker
       target: final
-    env_file:
-      - .env
     environment:
       AWS_SECRET_ID: "${AWS_SECRET_ID:-alphamatics/dev}"
+      ENV: "${ENV:-production}"
+      NATS_MAX_AGE_HOURS: "${NATS_MAX_AGE_HOURS:-72}"
+      NATS_TELEMATICS_MAX_BYTES: "${NATS_TELEMATICS_MAX_BYTES:?Set NATS_TELEMATICS_MAX_BYTES}"
+      NATS_COMMANDS_MAX_BYTES: "${NATS_COMMANDS_MAX_BYTES:?Set NATS_COMMANDS_MAX_BYTES}"
     ports:
       - 4001:4001
     depends_on:
