@@ -123,18 +123,25 @@ jobs:
           EC2_USER: ${{ secrets.EC2_USER }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
           AWS_SECRET_ID: ${{ vars.AWS_SECRET_ID }}
+          NATS_MAX_AGE_HOURS: ${{ vars.NATS_MAX_AGE_HOURS }}
+          NATS_TELEMATICS_MAX_BYTES: ${{ vars.NATS_TELEMATICS_MAX_BYTES }}
+          NATS_COMMANDS_MAX_BYTES: ${{ vars.NATS_COMMANDS_MAX_BYTES }}
           REGISTRY: ${{ steps.ecr.outputs.registry }}
           BROKER_IMAGE: ${{ steps.image.outputs.release }}
         run: |
           set -euo pipefail
           : "${AWS_SECRET_ID:?Set the AWS_SECRET_ID GitHub variable for this environment}"
+          : "${NATS_TELEMATICS_MAX_BYTES:?Set the NATS_TELEMATICS_MAX_BYTES GitHub variable for this environment}"
+          : "${NATS_COMMANDS_MAX_BYTES:?Set the NATS_COMMANDS_MAX_BYTES GitHub variable for this environment}"
 
           install -m 700 -d ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           ssh_opts=(-i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new)
 
-          printf 'BROKER_IMAGE=%s\nAWS_SECRET_ID=%s\n' "$BROKER_IMAGE" "$AWS_SECRET_ID" > "$RUNNER_TEMP/broker-image.env"
+          printf 'BROKER_IMAGE=%s\nAWS_SECRET_ID=%s\nENV=%s\nNATS_MAX_AGE_HOURS=%s\nNATS_TELEMATICS_MAX_BYTES=%s\nNATS_COMMANDS_MAX_BYTES=%s\n' \
+            "$BROKER_IMAGE" "$AWS_SECRET_ID" "$DEPLOY_STAGE" "$NATS_MAX_AGE_HOURS" \
+            "$NATS_TELEMATICS_MAX_BYTES" "$NATS_COMMANDS_MAX_BYTES" > "$RUNNER_TEMP/broker-image.env"
           scp "${ssh_opts[@]}" compose.yaml "${EC2_USER}@${EC2_HOST}:/tmp/compose.yaml"
           scp "${ssh_opts[@]}" "$RUNNER_TEMP/broker-image.env" "${EC2_USER}@${EC2_HOST}:/tmp/broker-image.env"
           # shellcheck disable=SC2029 # runner values intentionally expand here
