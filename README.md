@@ -1,5 +1,21 @@
 # Broker
 
+## AWS secrets at startup
+
+The broker loads the JSON secret `alphamatics/dev` from AWS Secrets Manager before
+connecting to its services. Set `AWS_SECRET_ID` in the runtime environment to use
+a different secret. The deploy workflow reads it from the GitHub
+`AWS_SECRET_ID` variable for the selected environment and passes it into the
+broker container. Values found in the secret take precedence over matching
+environment variables; keys absent from the secret still come from the runtime
+environment or `.env`. The process needs AWS credentials with
+`secretsmanager:GetSecretValue` permission and a configured AWS Region. Startup
+fails if the secret cannot be loaded or is not a JSON object of strings.
+
+Code can read the loaded values through `secrets_manager::secrets()` or use
+`secrets_manager::var("DATABASE_URL")` for the secret-first environment fallback.
+Secret values are not printed at startup.
+
 ## JetStream persistence and retention
 
 The NATS container stores JetStream data at `/data`, backed by the stable Docker
@@ -28,7 +44,7 @@ the JetStream data is intentional.
 
 Set these values in `/opt/broker/.env` on each host. That file supplies the
 broker container's runtime environment; `.image.env` is deployment metadata and
-contains only `BROKER_IMAGE`. `NATS_MAX_AGE_HOURS` is optional and defaults to
+contains `BROKER_IMAGE` and `AWS_SECRET_ID`. `NATS_MAX_AGE_HOURS` is optional and defaults to
 72.
 
 Use `-f compose.yaml` for manual lifecycle commands when the host still has a

@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.102"
 async-nats = "0.46.0"
+aws-config = {version = "1.8.11", features = ["credentials-login"]}
+aws-sdk-secretsmanager = "1.91.0"
 bytes = "1.11.1"
 deadpool-postgres = "0.14.1"
 dotenvy = "0.15.7"

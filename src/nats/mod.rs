@@ -7,11 +7,14 @@ use async_nats::{
 };
 
 use crate::{
-    commands::CommandResponsePayload, db::UnitMake, units::teltonika::types::TeltonikaFrame,
+    commands::CommandResponsePayload,
+    db::UnitMake,
+    config::aws::secrets_manager::var as config_var,
+    units::teltonika::types::TeltonikaFrame,
 };
 
 pub async fn nats_connect() -> io::Result<jetstream::Context> {
-    let nats_url = dotenvy::var("NATS_URL").expect("NATS_URL to be defined...");
+    let nats_url = config_var("NATS_URL").expect("NATS_URL to be defined...");
     let client = connect(nats_url)
         .await
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
@@ -49,9 +52,8 @@ pub async fn nats_publish_command_response(
     jetstream: &Context,
     payload: &CommandResponsePayload,
 ) -> io::Result<()> {
-    let subject_prefix =
-        dotenvy::var("NATS_COMMAND_RESPONSE_SUBJECT")
-            .unwrap_or("units.command_response.*".to_string());
+    let subject_prefix = config_var("NATS_COMMAND_RESPONSE_SUBJECT")
+        .unwrap_or("units.command_response.*".to_string());
     let subject = response_subject(&subject_prefix, &payload.imei)?;
 
     let payload = serde_json::to_vec(payload).map_err(io::Error::other)?;
@@ -72,13 +74,12 @@ pub async fn nats_publish_command_response(
 
 async fn ensure_stream(js: &Context) -> io::Result<()> {
     let limits = stream_limits_from_env()?;
-    let telematics_stream = dotenvy::var("NATS_STREAM").unwrap_or("TELEMATICS".to_string());
-    let command_stream = dotenvy::var("NATS_COMMAND_STREAM").unwrap_or("COMMANDS".to_string());
-    let avl_subject = dotenvy::var("NATS_SUBJECT").expect("NATS_SUBJECT has to be defined.");
+    let telematics_stream = config_var("NATS_STREAM").unwrap_or("TELEMATICS".to_string());
+    let command_stream = config_var("NATS_COMMAND_STREAM").unwrap_or("COMMANDS".to_string());
+    let avl_subject = config_var("NATS_SUBJECT").expect("NATS_SUBJECT has to be defined.");
     let command_subject = command_subject();
-    let command_response_subject =
-        dotenvy::var("NATS_COMMAND_RESPONSE_SUBJECT")
-            .unwrap_or("units.command_response.*".to_string());
+    let command_response_subject = config_var("NATS_COMMAND_RESPONSE_SUBJECT")
+        .unwrap_or("units.command_response.*".to_string());
 
     tracing::info!(stream = %telematics_stream, subject = %avl_subject, "ensuring stream");
     js.create_or_update_stream(async_nats::jetstream::stream::Config {
@@ -121,8 +122,7 @@ struct StreamLimits {
 }
 
 fn stream_limits_from_env() -> io::Result<StreamLimits> {
-    let max_age_hours =
-        dotenvy::var("NATS_MAX_AGE_HOURS").unwrap_or_else(|_| "72".to_string());
+    let max_age_hours = config_var("NATS_MAX_AGE_HOURS").unwrap_or_else(|_| "72".to_string());
     let telematics_max_bytes = required_env("NATS_TELEMATICS_MAX_BYTES")?;
     let commands_max_bytes = required_env("NATS_COMMANDS_MAX_BYTES")?;
 
@@ -134,7 +134,7 @@ fn stream_limits_from_env() -> io::Result<StreamLimits> {
 }
 
 fn required_env(name: &str) -> io::Result<String> {
-    dotenvy::var(name).map_err(|_| {
+    config_var(name).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{name} must be set to a positive byte limit"),
@@ -205,8 +205,8 @@ fn parse_positive_i64(name: &str, value: &str) -> io::Result<i64> {
 }
 
 fn command_subject() -> String {
-    dotenvy::var("NATS_COMMAND_SUBJECT")
-        .or_else(|_| dotenvy::var("NATS_SUBJECT_COMMANDS"))
+    config_var("NATS_COMMAND_SUBJECT")
+        .or_else(|_| config_var("NATS_SUBJECT_COMMANDS"))
         .unwrap_or("units.command.*".to_string())
 }
 

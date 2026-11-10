@@ -14,6 +14,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 use crate::{
     commands::{CommandQueue, supervise_command_listener},
     db::{UnitCache, build_pool},
+    config::aws::secrets_manager::{self, var as config_var},
     nats::nats_connect,
     rfid::RfidEnrollmentPublisher,
     units::teltonika::{teltonika_listen, utils::teltonika_read_imei},
@@ -25,6 +26,7 @@ mod nats;
 mod redis;
 mod rfid;
 mod units;
+mod config;
 
 /// A device must send its IMEI this soon after connecting. Also bounds NLB
 /// health checks and port scanners that connect and never speak.
@@ -94,7 +96,7 @@ fn log_connection_error(err: &io::Error) {
 }
 
 async fn tokio_main() -> io::Result<()> {
-    let addr = dotenvy::var("ADDR").unwrap_or("127.0.0.1:4001".to_string());
+    let addr = config_var("ADDR").unwrap_or("127.0.0.1:4001".to_string());
 
     let units = UnitCache::load(build_pool()?).await?;
 
@@ -162,9 +164,19 @@ fn init_tracing() {
 
 fn main() -> io::Result<()> {
     dotenvy::dotenv().ok();
+    init_tracing();
 
-    let environment = dotenvy::var("ENV").unwrap_or("production".to_string());
-    let sentry_dns = dotenvy::var("SENTRY_DSN").expect("SENTRY_DSN must be set");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(io::Error::other)?;
+    let secret_id = dotenvy::var("AWS_SECRET_ID").unwrap_or_else(|_| "alphamatics/dev".to_string());
+    runtime
+        .block_on(secrets_manager::init(&secret_id))
+        .map_err(|err| io::Error::other(format!("{err:#}")))?;
+
+    let environment = config_var("ENV").unwrap_or("production".to_string());
+    let sentry_dns = config_var("SENTRY_DSN").expect("SENTRY_DSN must be set");
     let _guard = sentry::init((
         sentry_dns,
         sentry::ClientOptions {
@@ -175,13 +187,6 @@ fn main() -> io::Result<()> {
             ..Default::default()
         },
     ));
-
-    init_tracing();
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(io::Error::other)?;
 
     if let Err(err) = runtime.block_on(tokio_main()) {
         error!(error = %err, "broker stopped");
