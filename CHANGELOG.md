@@ -1,6 +1,12 @@
 # Changelog
 
 
+## [v1.0.1](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v1.0.0...v1.0.1)
+
+* Merge pull request #24 from TheCodeSommelier/feature/remove-broker-host-env [[2909168d8ccf15be4d200d6c7052f59002c97eff](https://github.com/TheCodeSommelier/alphamatics_broker/commit/2909168d8ccf15be4d200d6c7052f59002c97eff)]
+* fix: remove broker host env dependency [[9f53d0cc66048ca9c97ff0964b807e541ab2c359](https://github.com/TheCodeSommelier/alphamatics_broker/commit/9f53d0cc66048ca9c97ff0964b807e541ab2c359)]
+
+
 ## [v1.0.0](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v0.19.0...v1.0.0)
 
 * Merge pull request #23 from TheCodeSommelier/feature/aws-secrets-manager [[94d2fa09f75d7614dd4fb1246d7e3b7a5248cba3](https://github.com/TheCodeSommelier/alphamatics_broker/commit/94d2fa09f75d7614dd4fb1246d7e3b7a5248cba3)]
