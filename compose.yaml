@@ -32,6 +32,8 @@ services:
       target: final
     env_file:
       - .env
+    environment:
+      AWS_SECRET_ID: "${AWS_SECRET_ID:-alphamatics/dev}"
     ports:
       - 4001:4001
     depends_on:

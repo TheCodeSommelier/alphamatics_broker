@@ -122,25 +122,28 @@ jobs:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_SECRET_ID: ${{ vars.AWS_SECRET_ID }}
           REGISTRY: ${{ steps.ecr.outputs.registry }}
           BROKER_IMAGE: ${{ steps.image.outputs.release }}
         run: |
           set -euo pipefail
+          : "${AWS_SECRET_ID:?Set the AWS_SECRET_ID GitHub variable for this environment}"
 
           install -m 700 -d ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           ssh_opts=(-i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new)
 
+          printf 'BROKER_IMAGE=%s\nAWS_SECRET_ID=%s\n' "$BROKER_IMAGE" "$AWS_SECRET_ID" > "$RUNNER_TEMP/broker-image.env"
           scp "${ssh_opts[@]}" compose.yaml "${EC2_USER}@${EC2_HOST}:/tmp/compose.yaml"
+          scp "${ssh_opts[@]}" "$RUNNER_TEMP/broker-image.env" "${EC2_USER}@${EC2_HOST}:/tmp/broker-image.env"
           # shellcheck disable=SC2029 # runner values intentionally expand here
           ssh "${ssh_opts[@]}" "${EC2_USER}@${EC2_HOST}" "set -euo pipefail
             sudo mkdir -p /opt/broker
             sudo install -m 0644 /tmp/compose.yaml /opt/broker/compose.yaml
+            sudo install -m 0644 /tmp/broker-image.env /opt/broker/.image.env
             aws ecr get-login-password --region ${AWS_REGION} \
               | docker login --username AWS --password-stdin ${REGISTRY}
-            printf 'BROKER_IMAGE=%s\\n' ${BROKER_IMAGE} \
-              | sudo tee /opt/broker/.image.env > /dev/null
             cd /opt/broker
             docker compose -f compose.yaml --env-file .image.env pull broker
             docker compose -f compose.yaml --env-file .image.env up -d broker
