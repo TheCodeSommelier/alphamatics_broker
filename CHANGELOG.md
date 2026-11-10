@@ -1,6 +1,14 @@
 # Changelog
 
 
+## [v1.0.0](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v0.19.0...v1.0.0)
+
+* Merge pull request #23 from TheCodeSommelier/feature/aws-secrets-manager [[94d2fa09f75d7614dd4fb1246d7e3b7a5248cba3](https://github.com/TheCodeSommelier/alphamatics_broker/commit/94d2fa09f75d7614dd4fb1246d7e3b7a5248cba3)]
+* fix: pass AWS secret ID to broker container [[78b2a4274f100c7ec04493470df88f71e20969da](https://github.com/TheCodeSommelier/alphamatics_broker/commit/78b2a4274f100c7ec04493470df88f71e20969da)]
+* fix: align CI Rust toolchain with AWS SDK [[a5c77e9cc56feeb787a985632e32f381a258d10c](https://github.com/TheCodeSommelier/alphamatics_broker/commit/a5c77e9cc56feeb787a985632e32f381a258d10c)]
+* feat: add aws secrets BREAKING CHANGE [[311dbb260b32e1894ac4603892f33c296c7a657a](https://github.com/TheCodeSommelier/alphamatics_broker/commit/311dbb260b32e1894ac4603892f33c296c7a657a)]
+
+
 ## [v0.19.0](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v0.18.0...v0.19.0)
 
 * Merge pull request #22 from TheCodeSommelier/feature/imei-cache [[66c760cb000071cc97c17d69a31f2091448bd394](https://github.com/TheCodeSommelier/alphamatics_broker/commit/66c760cb000071cc97c17d69a31f2091448bd394)]
