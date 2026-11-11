@@ -16,6 +16,11 @@ Code can read the loaded values through `secrets_manager::secrets()` or use
 `secrets_manager::var("DATABASE_URL")` for the secret-first environment fallback.
 Secret values are not printed at startup.
 
+For Redis, `REDIS_URL` may contain just the host. The broker reads `REDIS_PORT`,
+`REDIS_USER`, and `REDIS_PASS` separately from the same secret and adds them to
+the in-memory connection settings. An explicit port in `REDIS_URL` takes
+precedence over `REDIS_PORT`.
+
 ## JetStream persistence and retention
 
 The NATS container stores JetStream data at `/data`, backed by the stable Docker
