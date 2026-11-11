@@ -1,29 +1,6 @@
-# Comments are provided throughout this file to help you get started.
-# If you need more help, visit the Docker Compose reference guide at
-# https://docs.docker.com/go/compose-spec-reference/
-
-# Here the instructions define your application as a service called "server".
-# This service is built from the Dockerfile in the current directory.
-# You can add other services your application may depend on here, such as a
-# database or a cache. For examples, see the Awesome Compose repository:
-# https://github.com/docker/awesome-compose
 services:
-  nats:
-    image: nats:2
-    command:
-      - "-js"
-      - "-sd"
-      - "/data"
-    volumes:
-      - nats-data:/data
-    # NATS has no auth configured. The client port must stay restricted by the
-    # security group to the backend; the monitoring port is loopback-only (use
-    # an SSH tunnel to reach it).
-    ports:
-      - "4222:4222"
-      - "127.0.0.1:8222:8222"
-    restart: unless-stopped
   broker:
+    container_name: "broker"
     image: "${BROKER_IMAGE:-broker:local}"
     build:
       context: .
@@ -38,12 +15,11 @@ services:
       NATS_COMMANDS_MAX_BYTES: "${NATS_COMMANDS_MAX_BYTES:?Set NATS_COMMANDS_MAX_BYTES}"
     ports:
       - 4001:4001
-    depends_on:
-      - nats
+    networks:
+      - broker-nats
     restart: unless-stopped
 
-volumes:
-  nats-data:
-    # Stable across Compose project-name or checkout changes. Docker stores
-    # this volume in its data root on the host filesystem.
-    name: alphamatics-broker-nats-data
+networks:
+  broker-nats:
+    external: true
+    name: alphamatics-broker-nats

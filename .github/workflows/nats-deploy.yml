@@ -1,0 +1,70 @@
+name: Deploy NATS
+
+# NATS has its own Compose project and is deployed only by a manual run.
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: Environment to deploy
+        required: true
+        default: staging
+        type: choice
+        options:
+          - staging
+          - production
+      migrate_legacy_nats:
+        description: Stop and remove the NATS container from the old broker Compose project
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: deploy-nats-${{ inputs.stage }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.stage }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to EC2
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          MIGRATE_LEGACY_NATS: ${{ inputs.migrate_legacy_nats }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh_opts=(-i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new)
+
+          scp "${ssh_opts[@]}" nats-compose.yaml "${EC2_USER}@${EC2_HOST}:/tmp/nats-compose.yaml"
+          # shellcheck disable=SC2029 # runner value intentionally expands here
+          ssh "${ssh_opts[@]}" "${EC2_USER}@${EC2_HOST}" "set -euo pipefail
+            sudo mkdir -p /opt/broker
+            sudo install -m 0644 /tmp/nats-compose.yaml /opt/broker/nats-compose.yaml
+            docker volume inspect alphamatics-broker-nats-data >/dev/null
+            docker network inspect alphamatics-broker-nats >/dev/null 2>&1 \
+              || docker network create alphamatics-broker-nats
+            cd /opt/broker
+            docker compose -f nats-compose.yaml config --quiet
+            docker compose -f nats-compose.yaml pull nats
+            legacy_nats=\$(docker ps -aq \
+              --filter label=com.docker.compose.project=broker \
+              --filter label=com.docker.compose.service=nats)
+            if [ -n \"\$legacy_nats\" ]; then
+              if [ '${MIGRATE_LEGACY_NATS}' != 'true' ]; then
+                echo 'Old broker-project NATS exists. Re-run with migrate_legacy_nats enabled.' >&2
+                exit 1
+              fi
+              docker stop \$legacy_nats
+              docker rm \$legacy_nats
+            fi
+            docker compose -f nats-compose.yaml up -d nats"

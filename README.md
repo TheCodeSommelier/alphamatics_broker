@@ -21,6 +21,50 @@ For Redis, `REDIS_URL` may contain just the host. The broker reads `REDIS_PORT`,
 the in-memory connection settings. An explicit port in `REDIS_URL` takes
 precedence over `REDIS_PORT`.
 
+## Separate broker and NATS deployments
+
+The broker and NATS now have separate Compose projects. `compose.yaml` contains
+only the broker; `nats-compose.yaml` contains only NATS. Both join the external
+`alphamatics-broker-nats` Docker network, so the broker can continue using a
+`NATS_URL` with the hostname `nats`. The broker release workflow deploys only
+the broker. NATS is updated only by manually running the **Deploy NATS**
+workflow for the desired environment.
+
+The broker workflow publishes one image tag with `linux/amd64` and
+`linux/arm64` variants. Docker pulls the variant matching the EC2 host. The
+official `nats:2` image also provides ARM64, so the NATS Compose file needs no
+platform override.
+
+On an existing host, merge the broker change first. That deploy creates the
+shared network and attaches the old, running NATS container to it before
+recreating the broker. Check that the broker reconnects to NATS, then run
+**Deploy NATS** with `migrate_legacy_nats` enabled. This stops and removes the
+old NATS container and starts NATS from `nats-compose.yaml` using the same
+named volume. Expect a brief NATS interruption during this one-time migration.
+After that, leave `migrate_legacy_nats` off for routine NATS deploys.
+
+Before the migration, confirm the broker's `NATS_URL` uses `nats` as its host.
+The workflow checks that the existing data volume is present before stopping
+the old container. On a fresh host, create the shared resources once before
+the first deploy:
+
+```sh
+docker network create alphamatics-broker-nats
+docker volume create alphamatics-broker-nats-data
+```
+
+For manual restarts on the host, use the two Compose files separately:
+
+```sh
+cd /opt/broker
+docker compose -f nats-compose.yaml up -d nats
+docker compose -f compose.yaml --env-file .image.env up -d broker
+```
+
+Do not use `docker compose down` with the legacy broker project before the old
+NATS container has been migrated: it can stop NATS. Do not use
+`--remove-orphans` while that old container still exists.
+
 ## JetStream persistence and retention
 
 The NATS container stores JetStream data at `/data`, backed by the stable Docker
@@ -53,14 +97,6 @@ The deploy workflow writes them, `AWS_SECRET_ID`, `ENV`, and `BROKER_IMAGE` to
 container. The host `/opt/broker/.env` file is no longer used. For local Compose
 runs, provide the required byte limits through the shell environment or a local
 `.env` file. `NATS_MAX_AGE_HOURS` is optional and defaults to 72.
-
-Use `-f compose.yaml` for manual lifecycle commands when the host still has a
-legacy `docker-compose.yml`, for example:
-
-```sh
-docker compose -f compose.yaml down
-docker compose -f compose.yaml --env-file .image.env up -d broker
-```
 
 This protects data from container replacement, not EC2 termination. AWS deletes
 a root EBS volume on instance termination by default. For data that must survive

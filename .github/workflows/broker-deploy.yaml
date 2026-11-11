@@ -101,6 +101,8 @@ jobs:
             echo "release=${repo}:${DEPLOY_STAGE}-${version}"
           } >> "$GITHUB_OUTPUT"
 
+      - uses: docker/setup-qemu-action@v3
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Build and push image
@@ -108,6 +110,7 @@ jobs:
         with:
           context: .
           target: final
+          platforms: linux/amd64,linux/arm64
           push: true
           provenance: false
           tags: |
@@ -151,6 +154,18 @@ jobs:
             sudo install -m 0644 /tmp/broker-image.env /opt/broker/.image.env
             aws ecr get-login-password --region ${AWS_REGION} \
               | docker login --username AWS --password-stdin ${REGISTRY}
+            docker network inspect alphamatics-broker-nats >/dev/null 2>&1 \
+              || docker network create alphamatics-broker-nats
+            # During the first broker deploy, bridge the still-running NATS
+            # container from the old Compose project onto the shared network.
+            legacy_nats=\$(docker ps -q \
+              --filter label=com.docker.compose.project=broker \
+              --filter label=com.docker.compose.service=nats)
+            if [ -n \"\$legacy_nats\" ] && \
+               ! docker network inspect alphamatics-broker-nats --format '{{json .Containers}}' \
+                 | grep -q \"\$legacy_nats\"; then
+              docker network connect --alias nats alphamatics-broker-nats \$legacy_nats
+            fi
             cd /opt/broker
             docker compose -f compose.yaml --env-file .image.env pull broker
             docker compose -f compose.yaml --env-file .image.env up -d broker
