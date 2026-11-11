@@ -1,6 +1,12 @@
 # Changelog
 
 
+## [v1.0.2](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v1.0.1...v1.0.2)
+
+* Merge pull request #25 from TheCodeSommelier/fix/redis-secret-auth [[0c0692215a3d0e68053513a6e5d79605ae8ad7e8](https://github.com/TheCodeSommelier/alphamatics_broker/commit/0c0692215a3d0e68053513a6e5d79605ae8ad7e8)]
+* fix: use Redis credentials from AWS secret [[5cdc7cb58524b117a8af45932b129d1879fab418](https://github.com/TheCodeSommelier/alphamatics_broker/commit/5cdc7cb58524b117a8af45932b129d1879fab418)]
+
+
 ## [v1.0.1](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v1.0.0...v1.0.1)
 
 * Merge pull request #24 from TheCodeSommelier/feature/remove-broker-host-env [[2909168d8ccf15be4d200d6c7052f59002c97eff](https://github.com/TheCodeSommelier/alphamatics_broker/commit/2909168d8ccf15be4d200d6c7052f59002c97eff)]
