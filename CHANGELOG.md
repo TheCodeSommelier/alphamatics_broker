@@ -1,6 +1,12 @@
 # Changelog
 
 
+## [v2.0.0](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v1.0.2...v2.0.0)
+
+* Merge pull request #26 from TheCodeSommelier/feature/migrate-arm-architecture [[b78d53adcc4bfb09e6ffd9816a86a8b225bdb715](https://github.com/TheCodeSommelier/alphamatics_broker/commit/b78d53adcc4bfb09e6ffd9816a86a8b225bdb715)]
+* feat: add arm support BREAKING CHANGE [[349d613b68424e4adf35d80f37791d1cb6a0155b](https://github.com/TheCodeSommelier/alphamatics_broker/commit/349d613b68424e4adf35d80f37791d1cb6a0155b)]
+
+
 ## [v1.0.2](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v1.0.1...v1.0.2)
 
 * Merge pull request #25 from TheCodeSommelier/fix/redis-secret-auth [[0c0692215a3d0e68053513a6e5d79605ae8ad7e8](https://github.com/TheCodeSommelier/alphamatics_broker/commit/0c0692215a3d0e68053513a6e5d79605ae8ad7e8)]
