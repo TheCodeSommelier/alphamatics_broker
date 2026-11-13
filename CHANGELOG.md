@@ -1,6 +1,12 @@
 # Changelog
 
 
+## [v2.1.0](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v2.0.0...v2.1.0)
+
+* Merge pull request #27 from TheCodeSommelier/feature/migrate-arm-architecture [[8a40486a5ae85855d481e5cce694248ab5d29028](https://github.com/TheCodeSommelier/alphamatics_broker/commit/8a40486a5ae85855d481e5cce694248ab5d29028)]
+* feat: use native ARM runners in the gh pipeline [[81de0e15eb7df4ab0417efaeacb417f4120604a1](https://github.com/TheCodeSommelier/alphamatics_broker/commit/81de0e15eb7df4ab0417efaeacb417f4120604a1)]
+
+
 ## [v2.0.0](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v1.0.2...v2.0.0)
 
 * Merge pull request #26 from TheCodeSommelier/feature/migrate-arm-architecture [[b78d53adcc4bfb09e6ffd9816a86a8b225bdb715](https://github.com/TheCodeSommelier/alphamatics_broker/commit/b78d53adcc4bfb09e6ffd9816a86a8b225bdb715)]
