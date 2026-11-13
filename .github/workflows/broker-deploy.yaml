@@ -61,11 +61,120 @@ jobs:
           # at main's release commit, so resolve the branch from the newest tag.
           echo "branch=release/$(git tag --list 'v*' --sort=-v:refname | head -n1)" >> "$GITHUB_OUTPUT"
 
-  deploy:
+  build:
     needs: [checks, release]
-    # A manual run skips release creation but must still run the deployment.
+    # A manual run skips release creation but still builds the chosen release.
     if: ${{ !cancelled() && !failure() }}
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.stage || 'staging' }}
+    env:
+      RELEASE_BRANCH: ${{ needs.release.outputs.branch || github.ref_name }}
+
+    steps:
+      - name: Require a release branch
+        if: ${{ !startsWith(env.RELEASE_BRANCH, 'release/v') }}
+        run: |
+          echo "Deploys run from a release/vX.Y.Z branch, not ${RELEASE_BRANCH}." >&2
+          exit 1
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_BRANCH }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push native image by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: final
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ steps.ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }},push-by-digest=true,name-canonical=true,push=true
+          provenance: false
+          cache-from: type=gha,scope=broker-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=broker-${{ matrix.arch }}
+
+      - name: Save image digest
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          printf '%s\n' '${{ steps.build.outputs.digest }}' > "$RUNNER_TEMP/digests/${{ matrix.arch }}.digest"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/${{ matrix.arch }}.digest
+          if-no-files-found: error
+          retention-days: 1
+
+  manifest:
+    needs: [release, build]
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-24.04
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.stage || 'staging' }}
+    env:
+      RELEASE_BRANCH: ${{ needs.release.outputs.branch || github.ref_name }}
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digests-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - name: Publish multi-architecture tags
+        run: |
+          set -euo pipefail
+          repo="${{ steps.ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}"
+          version="${RELEASE_BRANCH#release/}"
+          refs=()
+          for arch in amd64 arm64; do
+            digest="$(cat "$RUNNER_TEMP/digests/${arch}.digest")"
+            [[ "$digest" == sha256:* ]] || { echo "Invalid ${arch} digest" >&2; exit 1; }
+            refs+=("${repo}@${digest}")
+          done
+          docker buildx imagetools create \
+            --tag "${repo}:${DEPLOY_STAGE}-${version}" \
+            --tag "${repo}:${DEPLOY_STAGE}" \
+            "${refs[@]}"
+          docker buildx imagetools inspect "${repo}:${DEPLOY_STAGE}-${version}"
+
+  deploy:
+    needs: [release, manifest]
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-24.04
     environment: ${{ github.event_name == 'workflow_dispatch' && inputs.stage || 'staging' }}
     env:
       RELEASE_BRANCH: ${{ needs.release.outputs.branch || github.ref_name }}
@@ -100,24 +209,6 @@ jobs:
             echo "repo=${repo}"
             echo "release=${repo}:${DEPLOY_STAGE}-${version}"
           } >> "$GITHUB_OUTPUT"
-
-      - uses: docker/setup-qemu-action@v3
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build and push image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: final
-          platforms: linux/amd64,linux/arm64
-          push: true
-          provenance: false
-          tags: |
-            ${{ steps.image.outputs.release }}
-            ${{ steps.image.outputs.repo }}:${{ env.DEPLOY_STAGE }}
-          cache-from: type=gha,scope=broker
-          cache-to: type=gha,mode=max,scope=broker
 
       - name: Deploy to EC2
         env:
