@@ -1,0 +1,26 @@
+name: alphamatics-nats
+
+services:
+  nats:
+    image: nats:2
+    command: ["-js", "-sd", "/data"]
+    volumes:
+      - nats-data:/data
+    # NATS has no auth configured. Restrict the client port with the host
+    # security group; the monitoring port is accessible only through the host.
+    ports:
+      - "4222:4222"
+      - "127.0.0.1:8222:8222"
+    networks:
+      - broker-nats
+    restart: unless-stopped
+
+volumes:
+  nats-data:
+    external: true
+    name: alphamatics-broker-nats-data
+
+networks:
+  broker-nats:
+    external: true
+    name: alphamatics-broker-nats
