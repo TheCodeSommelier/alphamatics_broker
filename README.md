@@ -30,8 +30,9 @@ only the broker; `nats-compose.yaml` contains only NATS. Both join the external
 the broker. NATS is updated only by manually running the **Deploy NATS**
 workflow for the desired environment.
 
-The broker workflow publishes one image tag with `linux/amd64` and
-`linux/arm64` variants. Docker pulls the variant matching the EC2 host. The
+The broker workflow builds `linux/amd64` and `linux/arm64` images in parallel
+on native GitHub runners, then publishes release and environment tags that
+contain both variants. Docker pulls the variant matching the EC2 host. The
 official `nats:2` image also provides ARM64, so the NATS Compose file needs no
 platform override.
 
