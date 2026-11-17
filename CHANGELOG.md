@@ -1,6 +1,12 @@
 # Changelog
 
 
+## [v2.2.0](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v2.1.0...v2.2.0)
+
+* Merge pull request #28 from TheCodeSommelier/feature/autoscaling [[4f29e6ab2b7b60ffcea80a015ba74290c6ca0be9](https://github.com/TheCodeSommelier/alphamatics_broker/commit/4f29e6ab2b7b60ffcea80a015ba74290c6ca0be9)]
+* feat: add the auto scale deploy script [[9e33c25c9ef8675c24158d14a0cfea00def3c3ed](https://github.com/TheCodeSommelier/alphamatics_broker/commit/9e33c25c9ef8675c24158d14a0cfea00def3c3ed)]
+
+
 ## [v2.1.0](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v2.0.0...v2.1.0)
 
 * Merge pull request #27 from TheCodeSommelier/feature/migrate-arm-architecture [[8a40486a5ae85855d481e5cce694248ab5d29028](https://github.com/TheCodeSommelier/alphamatics_broker/commit/8a40486a5ae85855d481e5cce694248ab5d29028)]
