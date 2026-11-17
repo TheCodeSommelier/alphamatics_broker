@@ -74,7 +74,7 @@ async fn process_socket(
     teltonika_listen(
         socket,
         accepted,
-        imei,
+        imei.to_string(),
         jetstream,
         make,
         command_queue,

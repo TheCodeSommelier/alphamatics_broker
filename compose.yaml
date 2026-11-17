@@ -1,7 +1,8 @@
+name: alphamatics-broker
+
 services:
   broker:
-    container_name: "broker"
-    image: "${BROKER_IMAGE:-broker:local}"
+    image: ${BROKER_IMAGE:-broker:local}
     build:
       context: .
       args:
@@ -9,17 +10,11 @@ services:
       target: final
     environment:
       AWS_SECRET_ID: "${AWS_SECRET_ID:-alphamatics/dev}"
+      AWS_REGION: "${AWS_REGION:-eu-central-1}"
       ENV: "${ENV:-production}"
       NATS_MAX_AGE_HOURS: "${NATS_MAX_AGE_HOURS:-72}"
       NATS_TELEMATICS_MAX_BYTES: "${NATS_TELEMATICS_MAX_BYTES:?Set NATS_TELEMATICS_MAX_BYTES}"
       NATS_COMMANDS_MAX_BYTES: "${NATS_COMMANDS_MAX_BYTES:?Set NATS_COMMANDS_MAX_BYTES}"
     ports:
-      - 4001:4001
-    networks:
-      - broker-nats
+      - "4001:4001"
     restart: unless-stopped
-
-networks:
-  broker-nats:
-    external: true
-    name: alphamatics-broker-nats
