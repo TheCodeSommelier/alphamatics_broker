@@ -2,11 +2,10 @@ name: alphamatics-broker
 
 services:
   broker:
+    container_name: broker
     image: ${BROKER_IMAGE:-broker:local}
     build:
       context: .
-      args:
-        APP_NAME: broker
       target: final
     environment:
       AWS_SECRET_ID: "${AWS_SECRET_ID:-alphamatics/dev}"

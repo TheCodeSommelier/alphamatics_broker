@@ -50,7 +50,14 @@ jobs:
           ssh "${ssh_opts[@]}" "${EC2_USER}@${EC2_HOST}" "set -euo pipefail
             sudo mkdir -p /opt/broker
             sudo install -m 0644 /tmp/nats-compose.yaml /opt/broker/nats-compose.yaml
-            docker volume inspect alphamatics-broker-nats-data >/dev/null
+            mountpoint -q /nats_data || {
+              echo 'NATS data EBS volume is not mounted at /nats_data.' >&2
+              exit 1
+            }
+            test -f /nats_data/.alphamatics-nats-data-ready || {
+              echo 'NATS data migration has not been marked complete.' >&2
+              exit 1
+            }
             docker network inspect alphamatics-broker-nats >/dev/null 2>&1 \
               || docker network create alphamatics-broker-nats
             cd /opt/broker
