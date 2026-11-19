@@ -1,6 +1,11 @@
 # Changelog
 
 
+## [v2.3.1](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v2.3.0...v2.3.1)
+
+* chore: trigger production promotion [[d1500d77cd9a706889418c41f277e1618bf3de1b](https://github.com/TheCodeSommelier/alphamatics_broker/commit/d1500d77cd9a706889418c41f277e1618bf3de1b)]
+
+
 ## [v2.3.0](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v2.2.0...v2.3.0)
 
 * Merge pull request #29 from TheCodeSommelier/feature/rename-containers [[778a4b10169144f6394fbe92c84f1e7831b9ddc2](https://github.com/TheCodeSommelier/alphamatics_broker/commit/778a4b10169144f6394fbe92c84f1e7831b9ddc2)]
