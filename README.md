@@ -33,20 +33,39 @@ secret. That URL must use the NATS host's private address or DNS name, not the
 old Docker service name `nats`.
 
 NATS remains on its existing host and is managed separately by the manual
-**Deploy NATS** GitHub Actions workflow. Its `nats-compose.yaml` uses the
-existing `alphamatics-broker-nats-data` volume. The workflow's
+**Deploy NATS** GitHub Actions workflow. Its `nats-compose.yaml` mounts the
+dedicated EBS volume at `/nats_data`. The workflow requires the mount and its
+`.alphamatics-nats-data-ready` marker before starting NATS. The workflow's
 `migrate_legacy_nats` option stops the old broker-project NATS container before
-starting the separate NATS project. Use that option only for the one-time
-migration after checking the current container and volume on the NATS host.
+starting the separate NATS project; it does not copy JetStream data from the
+old Docker volume. Use that option only for that one-time container migration.
 The broker ASG deployment does not update or restart NATS.
+
+### NATS launch templates
+
+`scripts/nats-user-data-launch-template.sh` is self-contained Amazon Linux
+2023 ARM64 user data. It identifies the extra EBS disk mapped as `/dev/sdf`,
+formats it as XFS only if blank, mounts it by UUID at `/nats_data`, and starts
+`nats:2` with JetStream using Docker and Compose. It waits for the NATS
+client greeting on TCP:4222. The stage and production NATS launch templates
+use this script, `t4g.micro`, their dedicated NATS IAM profiles and security
+groups, an 8 GiB root disk, and encrypted data disks of 5 GiB (stage) and
+15 GiB (production). The data disks have `DeleteOnTermination=false`.
+Creating a launch template does not launch a server or move existing data.
+
+Each new instance starts with an empty JetStream store on its own data disk.
+The data disk survives termination, but a replacement does not automatically
+reattach it. Do not launch the stage template alongside the current stage NATS
+host or use either template in a multi-instance ASG yet. First plan storage
+recovery, unique node identities, NATS routes on TCP:6222, and stream replica
+counts for a cluster. Until then, keep each environment to one NATS server.
 
 ## JetStream persistence and retention
 
-The NATS container stores JetStream data at `/data`, backed by the stable Docker
-named volume `alphamatics-broker-nats-data`. Docker keeps the volume in its data
-root on the host filesystem, so on a normal EBS-backed EC2 instance the data
-lives on the instance's root EBS volume. No separately mounted EBS data volume
-or `NATS_DATA_DIR` setting is required.
+The NATS container stores JetStream data at `/data`, backed by the host's
+dedicated EBS mount at `/nats_data`. The current staging host still uses the
+Docker volume `alphamatics-broker-nats-data` on its root disk until that data is
+copied to the new mount during a controlled NATS stop.
 
 Configure Compose and the broker with:
 
@@ -62,46 +81,34 @@ room for JetStream storage overhead and the 50/70/85% disk alarms. The broker
 creates or updates both streams with file storage and enforces the age, byte,
 and existing 10,000,000-message limits; whichever limit is reached first wins.
 
-The named volume survives container recreation and normal deployments. Do not
-run `docker compose down --volumes` or remove/prune this volume unless deleting
-the JetStream data is intentional.
+The EBS data volume survives NATS container recreation and instance
+termination, but a replacement instance needs that volume attached and mounted
+before NATS starts. Take tested EBS snapshots; `DeleteOnTermination=false` does
+not make a singleton highly available.
 
 Set the NATS limits as GitHub environment variables for each deployment stage.
 The ASG deploy writes them, `AWS_SECRET_ID`, `AWS_REGION`, `ENV`, and the immutable
 `BROKER_IMAGE` digest to `/opt/broker/.image.env` on each new broker instance.
 `compose.yaml` contains only the broker. It does not manage the singleton NATS
-host or its JetStream volume. For local Compose runs, provide the required byte
+host or its JetStream disk. For local Compose runs, provide the required byte
 limits through the shell environment or a local `.env` file.
 
-`nats-compose.yaml` is for manual NATS lifecycle on the existing singleton host.
-Before using it, inspect the running NATS container and its Compose project;
-do not start a second NATS container on the same port. Confirm that host already
-uses the `alphamatics-broker-nats-data` volume. The broker's `NATS_URL` in the AWS secret
-must resolve to the singleton NATS private address, not the old Compose service
-name `nats`. Do not run the broker ASG deployment against the NATS host.
+`nats-compose.yaml` is for manual NATS lifecycle on the singleton host. Confirm
+`/nats_data` is mounted before using it. The broker's `NATS_URL` in the AWS
+secret must resolve to the NATS host's private address, not the old Compose
+service name `nats`.
 
-This protects data from container replacement, not EC2 termination. AWS deletes
-a root EBS volume on instance termination by default. For data that must survive
-instance replacement, disable `DeleteOnTermination` for the root volume and/or
-take tested EBS snapshots.
+### Moving the existing stage data
 
-### One-time JetStream data copy from the old bind mount
-
-If NATS still uses an old bind mount, stop its running container using the
-currently deployed Compose project and copy the data into the named volume
-before running the manual NATS workflow:
-
-```sh
-docker volume create alphamatics-broker-nats-data
-docker run --rm \
-  --mount type=bind,src=/previous/nats/data,dst=/from,readonly \
-  --mount type=volume,src=alphamatics-broker-nats-data,dst=/to \
-  alpine sh -c 'cp -a /from/. /to/'
-```
-
-Replace `/previous/nats/data` with the previous `NATS_DATA_DIR`, then run the
-normal deployment. Verify the old directory and the new stream state before
-removing any old storage.
+The stage host currently has JetStream data in
+`/var/lib/docker/volumes/alphamatics-broker-nats-data/_data`. Take a snapshot of
+its root EBS volume before migrating. Create and attach the 5 GiB data volume
+in the same Availability Zone, format and mount it at `/nats_data`, then stop
+NATS, copy the old data including hidden files into the mounted directory, and
+start NATS using the updated Compose file. Verify the streams and broker
+connection before removing the old Docker volume. Create the
+`.alphamatics-nats-data-ready` marker on the mounted disk only after the copy;
+the new GitHub workflow requires it before deploying.
 
 ## Git commits
 

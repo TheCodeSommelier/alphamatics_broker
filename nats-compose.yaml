@@ -2,16 +2,12 @@ name: alphamatics-nats
 
 services:
   nats:
+    container_name: nats
     image: nats:2
     command: ["-js", "-sd", "/data"]
     volumes:
-      - nats-data:/data
+      - /nats_data:/data
     ports:
       - "4222:4222"
       - "127.0.0.1:8222:8222"
     restart: unless-stopped
-
-volumes:
-  nats-data:
-    external: true
-    name: alphamatics-broker-nats-data
