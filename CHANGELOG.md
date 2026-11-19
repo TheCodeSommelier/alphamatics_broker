@@ -1,6 +1,12 @@
 # Changelog
 
 
+## [v2.3.0](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v2.2.0...v2.3.0)
+
+* Merge pull request #29 from TheCodeSommelier/feature/rename-containers [[778a4b10169144f6394fbe92c84f1e7831b9ddc2](https://github.com/TheCodeSommelier/alphamatics_broker/commit/778a4b10169144f6394fbe92c84f1e7831b9ddc2)]
+* feat: rename the containers and add the user data for nats server launch templates [[842dcfad9759b6a36e2daf204958d35808e097ac](https://github.com/TheCodeSommelier/alphamatics_broker/commit/842dcfad9759b6a36e2daf204958d35808e097ac)]
+
+
 ## [v2.2.0](https://github.com/TheCodeSommelier/alphamatics_broker/compare/v2.1.0...v2.2.0)
 
 * Merge pull request #28 from TheCodeSommelier/feature/autoscaling [[4f29e6ab2b7b60ffcea80a015ba74290c6ca0be9](https://github.com/TheCodeSommelier/alphamatics_broker/commit/4f29e6ab2b7b60ffcea80a015ba74290c6ca0be9)]
