@@ -118,12 +118,24 @@ and `CHANGELOG.md`, tags the release, creates `release/vX.Y.Z`, builds one ARM64
 image, and deploys its digest to the staging broker ASG. It waits for the NLB
 TCP:4001 target to become healthy. The broker never runs database migrations.
 
-Production promotion is disabled until the repository variable
-`PRODUCTION_PROMOTION_ENABLED` is set to `true`. Before enabling it, configure
-the `production` GitHub environment with required reviewers and its AWS role,
-region, ECR repository, secret ID, and NATS limit values. A successful staging
-job then reaches the GitHub environment approval gate; approval deploys the
-same image digest to the production broker ASG.
+Production is deployed only by manually running **Promote broker release to
+production** in GitHub Actions from `main`. Enter the healthy staged
+`release/vX.Y.Z` branch. The workflow checks that the branch's ECR image digest
+matches the running staging ASG release and that all its NLB targets are
+healthy. It then deploys that same digest to the production broker ASG without
+building another image or redeploying staging. Configure the `production`
+GitHub environment with its AWS role, region, ECR repository, secret ID, and
+NATS limit values. Required reviewers may add a second approval step. The
+repository variable `PRODUCTION_PROMOTION_ENABLED` is no longer used.
+
+For a rollback to an older release, select **redeploy_staging** when starting
+the manual workflow. It first deploys the selected image to staging and checks
+that every staging NLB target is healthy before using that digest in production.
+Leave this option off for a normal production promotion.
+
+Deploy the production backend and its Prisma migrations before promoting a
+broker release to a new production database. The broker requires the `Unit`
+table at startup and cannot create it itself.
 
 The staging broker security group must allow TCP:4001 from its NLB security
 group and egress to the NATS host on TCP:4222, PostgreSQL on TCP:5432, Redis

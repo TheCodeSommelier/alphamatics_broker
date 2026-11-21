@@ -1,0 +1,245 @@
+name: Promote broker release to production
+run-name: Promote broker ${{ inputs.release_branch }} to production
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_branch:
+        description: Healthy staged release/vX.Y.Z branch to promote
+        required: true
+        type: string
+      redeploy_staging:
+        description: Rollback only - redeploy this release to staging first
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    environment: Staging
+    outputs:
+      release_sha: ${{ steps.release.outputs.release_sha }}
+      digest: ${{ steps.release.outputs.digest }}
+
+    steps:
+      - name: Validate manual selection
+        env:
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main ]] || {
+            echo 'Run this workflow from main.' >&2
+            exit 1
+          }
+          [[ "$RELEASE_BRANCH" =~ ^release/v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo 'Enter a release/vX.Y.Z branch.' >&2
+            exit 1
+          }
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_branch }}
+
+      - name: Configure staging AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Resolve existing release image
+        id: release
+        env:
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          release_sha="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          tag="${RELEASE_BRANCH#release/}-$short_sha"
+          digest="$(aws ecr describe-images \
+            --repository-name "$REPOSITORY" \
+            --image-ids "imageTag=$tag" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="$REGISTRY/$REPOSITORY@$digest"
+
+          echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Existing release image"
+            echo "- Branch: \`$RELEASE_BRANCH\`"
+            echo "- Commit: \`$release_sha\`"
+            echo "- Image: \`$image\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  verify_staging:
+    name: Verify staging ${{ inputs.release_branch }}
+    needs: resolve
+    runs-on: ubuntu-latest
+    environment: Staging
+    concurrency:
+      group: deploy-broker-staging
+      queue: max
+      cancel-in-progress: false
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.release_sha }}
+
+      - name: Configure staging AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to ECR for rollback
+        if: ${{ inputs.redeploy_staging }}
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Redeploy selected release to staging
+        if: ${{ inputs.redeploy_staging }}
+        env:
+          DEPLOY_STAGE: staging
+          ASG_NAME: ${{ vars.EC2_ASG_NAME || 'alphamatics-stage-broker-asg' }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_SECRET_ID: ${{ vars.AWS_SECRET_ID }}
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          IMAGE_DIGEST: ${{ needs.resolve.outputs.digest }}
+          NATS_MAX_AGE_HOURS: ${{ vars.NATS_MAX_AGE_HOURS || '72' }}
+          NATS_TELEMATICS_MAX_BYTES: ${{ vars.NATS_TELEMATICS_MAX_BYTES }}
+          NATS_COMMANDS_MAX_BYTES: ${{ vars.NATS_COMMANDS_MAX_BYTES }}
+          RELEASE_SHA: ${{ needs.resolve.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          export BROKER_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY@$IMAGE_DIGEST"
+          bash scripts/deploy-asg/deploy.sh
+
+      - name: Verify selected release is healthy in staging
+        env:
+          ASG_NAME: ${{ vars.EC2_ASG_NAME || 'alphamatics-stage-broker-asg' }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          DIGEST: ${{ needs.resolve.outputs.digest }}
+          RELEASE_SHA: ${{ needs.resolve.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          release_sha="$RELEASE_SHA"
+          account="$(aws sts get-caller-identity --query Account --output text)"
+          image="$account.dkr.ecr.$AWS_REGION.amazonaws.com/$REPOSITORY@$DIGEST"
+          asg="$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names "$ASG_NAME" \
+            --output json | jq -c '.AutoScalingGroups[0] // empty')"
+          [[ -n "$asg" ]] || { echo 'Staging ASG is missing.' >&2; exit 1; }
+          lt_id="$(jq -r '.LaunchTemplate.LaunchTemplateId // empty' <<< "$asg")"
+          lt_version="$(jq -r '.LaunchTemplate.Version // empty' <<< "$asg")"
+          target_group="$(jq -r '.TargetGroupARNs[0] // empty' <<< "$asg")"
+          [[ -n "$lt_id" && "$lt_version" =~ ^[0-9]+$ && -n "$target_group" ]] || {
+            echo 'Staging ASG is missing its template or target group.' >&2
+            exit 1
+          }
+          desired="$(jq -r '.DesiredCapacity' <<< "$asg")"
+          [[ "$desired" -ge 1 ]] || { echo 'Staging has no instances.' >&2; exit 1; }
+          jq -e --argjson desired "$desired" '
+            (.Instances | length) == $desired and
+            (.Instances | all(.LifecycleState == "InService" and .HealthStatus == "Healthy")) and
+            (.TargetGroupARNs | length) == 1
+          ' <<< "$asg" >/dev/null
+
+          lt="$(aws ec2 describe-launch-template-versions \
+            --launch-template-id "$lt_id" --versions "$lt_version" \
+            --output json | jq -c '.LaunchTemplateVersions[0]')"
+          lt_number="$(jq -r '.VersionNumber' <<< "$lt")"
+          [[ "$(jq -r '.VersionDescription' <<< "$lt")" == "AlphaMatics broker staging $release_sha" ]] || {
+            echo 'Staging is running a different release commit.' >&2
+            exit 1
+          }
+          jq -e --arg version "$lt_number" '
+            .Instances | all(.LaunchTemplate.Version == $version)
+          ' <<< "$asg" >/dev/null || {
+            echo 'Staging instances are not all on the selected release.' >&2
+            exit 1
+          }
+          user_data="$(jq -r '.LaunchTemplateData.UserData // empty' <<< "$lt" | base64 -d)"
+          grep -Fqx "# ALPHAMATICS_BROKER_RELEASE $image" <<< "$user_data" || {
+            echo 'The staged image digest differs from the selected release.' >&2
+            exit 1
+          }
+
+          health="$(aws elbv2 describe-target-health \
+            --target-group-arn "$target_group" --output json)"
+          ids="$(jq '[.Instances[].InstanceId]' <<< "$asg")"
+          jq -e --argjson ids "$ids" '
+            . as $health |
+            all($ids[];
+              . as $id |
+              [$health.TargetHealthDescriptions[] |
+                select(.Target.Id == $id and .TargetHealth.State == "healthy")
+              ] | length > 0
+            )
+          ' <<< "$health" >/dev/null || {
+            echo 'The selected staging release is not healthy in its NLB.' >&2
+            exit 1
+          }
+
+          echo "Verified $RELEASE_SHA and $DIGEST on healthy staging targets" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy_production:
+    name: Production ${{ inputs.release_branch }}
+    needs: [resolve, verify_staging]
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-broker-production
+      queue: max
+      cancel-in-progress: false
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.release_sha }}
+
+      - name: Configure production AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Promote the verified staged image
+        env:
+          DEPLOY_STAGE: production
+          ASG_NAME: ${{ vars.EC2_ASG_NAME || 'alphamatics-prod-broker-asg' }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_SECRET_ID: ${{ vars.AWS_SECRET_ID }}
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          IMAGE_DIGEST: ${{ needs.resolve.outputs.digest }}
+          NATS_MAX_AGE_HOURS: ${{ vars.NATS_MAX_AGE_HOURS || '72' }}
+          NATS_TELEMATICS_MAX_BYTES: ${{ vars.NATS_TELEMATICS_MAX_BYTES }}
+          NATS_COMMANDS_MAX_BYTES: ${{ vars.NATS_COMMANDS_MAX_BYTES }}
+          RELEASE_SHA: ${{ needs.resolve.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          export BROKER_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY@$IMAGE_DIGEST"
+          bash scripts/deploy-asg/deploy.sh
