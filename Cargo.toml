@@ -37,7 +37,7 @@ features = [ "full" ]
 
 [dependencies.redis]
 version = "1.0.4"
-features = [ "tokio-comp" ]
+features = [ "tokio-rustls-comp" ]
 
 [dependencies.socket2]
 version = "0.6"
